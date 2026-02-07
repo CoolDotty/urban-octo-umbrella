@@ -6,11 +6,8 @@ node_modules/
 
 # ---- Environment ----
 .env
-.env.local
-.env.*.local
-.env.development
-.env.test
-.env.production
+.env.*
+!.env.example
 
 # ---- Logs ----
 logs/
@@ -47,4 +44,3 @@ build/
 out/
 
 # ---- Safety ----
-.env
