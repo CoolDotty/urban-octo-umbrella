@@ -1,8 +1,6 @@
 {
   "name": "urban-octo-umbrella",
-  "build": {
-    "dockerfile": "Dockerfile"
-  },
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:latest",
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "remoteUser": "node",
   "containerUser": "node",
