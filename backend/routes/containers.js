@@ -34,7 +34,7 @@ function runGit(args, options) {
 }
 
 var APP_LABEL = 'com.urban-octo-umbrella.managed=true';
-var DEFAULT_SSH_USER = process.env.SSH_USER || 'user';
+var SSH_USER = 'root';
 var SSH_BIND = process.env.SSH_BIND || '0.0.0.0';
 var DOMAIN_NAME = process.env.DOMAIN_NAME || 'localhost';
 var PASSWORD_LABEL = 'com.urban-octo-umbrella.ssh_password';
@@ -236,6 +236,83 @@ function parseJsonc(contents) {
   }
 }
 
+function resolveDevcontainerPath(repoDir, jsonDir, inputPath) {
+  var raw = inputPath || '.';
+  var normalized = String(raw);
+  if (path.isAbsolute(normalized)) {
+    normalized = normalized.replace(/^[/\\]+/, '');
+  }
+  return path.join(repoDir, jsonDir, normalized);
+}
+
+async function podmanImageExists(tag) {
+  try {
+    await runPodman(['image', 'exists', tag]);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function createDevcontainerTag(repoUrl, repoCommit, jsonPath, buildConfig) {
+  var key = JSON.stringify({
+    repoUrl: repoUrl || null,
+    repoCommit: repoCommit || null,
+    jsonPath: jsonPath || null,
+    build: buildConfig || null
+  });
+  var digest = crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
+  return 'uou-devcontainer-' + digest;
+}
+
+async function buildDevcontainerImage(repoDir, jsonDir, buildConfig, metadata) {
+  if (!buildConfig) {
+    return null;
+  }
+  var dockerfile = null;
+  var contextDir = '.';
+  if (typeof buildConfig === 'string') {
+    dockerfile = buildConfig;
+  } else if (typeof buildConfig === 'object') {
+    dockerfile = buildConfig.dockerfile || 'Dockerfile';
+    contextDir = buildConfig.context || '.';
+  }
+  if (!dockerfile) {
+    return null;
+  }
+  var dockerfilePath = resolveDevcontainerPath(repoDir, jsonDir, dockerfile);
+  var contextPath = resolveDevcontainerPath(repoDir, jsonDir, contextDir);
+  var tag = createDevcontainerTag(
+    metadata && metadata.repoUrl,
+    metadata && metadata.repoCommit,
+    metadata && metadata.jsonPath,
+    buildConfig
+  );
+  if (await podmanImageExists(tag)) {
+    return tag;
+  }
+  var labels = [
+    'com.urban-octo-umbrella.devcontainer_cache=true'
+  ];
+  if (metadata && metadata.repoUrl) {
+    labels.push('com.urban-octo-umbrella.repo_url=' + metadata.repoUrl);
+  }
+  if (metadata && metadata.repoCommit) {
+    labels.push('com.urban-octo-umbrella.repo_commit=' + metadata.repoCommit);
+  }
+  if (metadata && metadata.jsonPath) {
+    labels.push('com.urban-octo-umbrella.devcontainer_path=' + metadata.jsonPath);
+  }
+  labels.push('com.urban-octo-umbrella.built_at=' + new Date().toISOString());
+  var buildArgs = ['build', '-t', tag];
+  labels.forEach(function(label) {
+    buildArgs.push('--label', label);
+  });
+  buildArgs.push('-f', dockerfilePath, contextPath);
+  await runPodman(buildArgs);
+  return tag;
+}
+
 async function findDevcontainerImage(repoUrl, accessToken) {
   if (!repoUrl) {
     return null;
@@ -275,11 +352,26 @@ async function findDevcontainerImage(repoUrl, accessToken) {
     }
     var jsonContents = await runGit(['-C', repoDir, 'show', 'HEAD:' + jsonPath]);
     var parsed = parseJsonc(String(jsonContents || ''));
-    if (!parsed || typeof parsed.image !== 'string') {
+    if (!parsed) {
       return null;
     }
-    var image = parsed.image.trim();
-    return image || null;
+    if (typeof parsed.image === 'string') {
+      var image = parsed.image.trim();
+      return image || null;
+    }
+    var jsonDir = path.posix.dirname(jsonPath);
+    var repoCommit = null;
+    try {
+      repoCommit = String(await runGit(['-C', repoDir, 'rev-parse', 'HEAD'])).trim();
+    } catch (_) {
+      repoCommit = null;
+    }
+    var builtImage = await buildDevcontainerImage(repoDir, jsonDir, parsed.build, {
+      repoUrl: repoUrl,
+      repoCommit: repoCommit,
+      jsonPath: jsonPath
+    });
+    return builtImage || null;
   } catch (err) {
     console.warn('Failed to inspect devcontainer.json:', err.message || err);
     return null;
@@ -335,7 +427,7 @@ router.get('/', async function(req, res) {
       var containerPort = '2222';
       var sshPort = await getSshPort(container.Id, containerPort);
       var sshHost = sshPort ? getHostForSsh(req) : null;
-      var sshUser = DEFAULT_SSH_USER;
+      var sshUser = SSH_USER;
       var includePort = true;
       var sshTarget = sshPort
         ? (sshUser + '@' + sshHost + (includePort ? ':' + sshPort : ''))
@@ -385,7 +477,7 @@ router.post('/', async function(req, res) {
       return res.status(400).json({ ok: false, error: 'Invalid repository URL' });
     }
     var repoDirName = repoName ? sanitizeRepoDirName(repoName) : null;
-    var repoDir = repoDirName ? ('/home/' + DEFAULT_SSH_USER + '/workspace/' + repoDirName) : null;
+    var repoDir = repoDirName ? ('/root/workspace/' + repoDirName) : null;
     var accessToken = req.user && req.user.accessToken ? String(req.user.accessToken) : null;
     var devcontainerImage = repoUrl ? await findDevcontainerImage(repoUrl, accessToken) : null;
     var imageToUse = devcontainerImage || DEFAULT_IMAGE;
@@ -419,21 +511,28 @@ router.post('/', async function(req, res) {
       'sh',
       '-c',
       'set -e; ' +
+        'if ! command -v sshd >/dev/null 2>&1; then ' +
+          'if command -v apt-get >/dev/null 2>&1; then ' +
+            'apt-get update && apt-get install -y openssh-server; ' +
+          'elif command -v apk >/dev/null 2>&1; then ' +
+            'apk add --no-cache openssh-server; ' +
+          'elif command -v dnf >/dev/null 2>&1; then ' +
+            'dnf -y install openssh-server; ' +
+          'elif command -v yum >/dev/null 2>&1; then ' +
+            'yum -y install openssh-server; ' +
+          'fi; ' +
+        'fi; ' +
         'if command -v sshd >/dev/null 2>&1; then ' +
-          'if ! id -u ' + DEFAULT_SSH_USER + ' >/dev/null 2>&1; then ' +
-            '(command -v useradd >/dev/null 2>&1 && useradd -m -s /bin/bash ' + DEFAULT_SSH_USER + ') || ' +
-            '(command -v adduser >/dev/null 2>&1 && adduser -D -s /bin/bash ' + DEFAULT_SSH_USER + ') || true; ' +
-          'fi; ' +
-          'echo \'' + DEFAULT_SSH_USER + ':' + password + '\' | chpasswd; ' +
-          'if [ -f /etc/ssh/sshd_config ]; then ' +
-            'sed -i "s/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config; ' +
-            'sed -i "s/^#\\?PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config; ' +
-            'if grep -q "^#\\?Port" /etc/ssh/sshd_config; then ' +
-              'sed -i "s/^#\\?Port .*/Port ' + sshdPort + '/" /etc/ssh/sshd_config; ' +
-            'else ' +
-              'echo "Port ' + sshdPort + '" >> /etc/ssh/sshd_config; ' +
-            'fi; ' +
-          'fi; ' +
+          'echo \'' + SSH_USER + ':' + password + '\' | chpasswd; ' +
+          'mkdir -p /etc/ssh/sshd_config.d; ' +
+          'cat > /etc/ssh/sshd_config.d/99-uou.conf <<EOF\n' +
+          'Port ' + sshdPort + '\n' +
+          'PasswordAuthentication yes\n' +
+          'KbdInteractiveAuthentication yes\n' +
+          'ChallengeResponseAuthentication yes\n' +
+          'PermitRootLogin yes\n' +
+          'UsePAM yes\n' +
+          'EOF\n' +
           'mkdir -p /var/run/sshd; ' +
           'ssh-keygen -A; ' +
           '/usr/sbin/sshd -D -e -p ' + sshdPort + '; ' +
@@ -445,7 +544,7 @@ router.post('/', async function(req, res) {
     var id = String(stdout || '').trim();
     if (repoUrl && repoDir) {
       try {
-        await runPodman(['exec', id, 'mkdir', '-p', '/home/' + DEFAULT_SSH_USER + '/workspace']);
+        await runPodman(['exec', id, 'mkdir', '-p', '/root/workspace']);
         if (accessToken) {
           var authHeader = Buffer.from('x-access-token:' + accessToken).toString('base64');
           await runPodman([
@@ -472,7 +571,6 @@ router.post('/', async function(req, res) {
             repoDir
           ]);
         }
-        await runPodman(['exec', id, 'chown', '-R', DEFAULT_SSH_USER + ':' + DEFAULT_SSH_USER, repoDir]);
       } catch (cloneErr) {
         try {
           await runPodman(['rm', '-f', id]);
