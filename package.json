@@ -8,6 +8,12 @@
     "start": "pnpm --filter backend start",
     "clean": "pnpm -r exec rm -rf node_modules dist && rm -rf node_modules",
     "postinstall": "pnpm --filter backend install && pnpm --filter frontend install",
-    "install:fresh": "pnpm clean && pnpm install"
+    "install:fresh": "pnpm clean && pnpm install",
+    
+    "tunnel:setup": "mkdir .vscode && podman run -d -v \"./.vscode:/root/.vscode\" -v \"./:/workspace\" --name delete-me alpine:latest tail -f /dev/null",
+    "tunnel:install": "podman exec -it delete-me sh -c \"apk add --no-cache curl tar bash && curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz && tar -xf vscode_cli.tar.gz -C /usr/local/bin && rm vscode_cli.tar.gz\"",
+    "tunnel:run": "podman exec -it delete-me sh -c \"cd /workspace && VSCODE_CLI_USE_FILE_KEYCHAIN=1 code tunnel --accept-server-license-terms --name delete-me & while [ ! -f /root/.vscode/cli/token.json ]; do sleep 1; done && pkill code\"",
+    "tunnel:cleanup": "podman rm -f delete-me && echo Done",
+    "tunnel": "pnpm run tunnel:setup && pnpm run tunnel:install && pnpm run tunnel:run && pnpm run tunnel:cleanup"
   }
 }
