@@ -25,13 +25,16 @@ const fetchSignupConfig = async () => {
   return response.data;
 };
 
+type AuthQueryOptions<
+  TQueryFnData,
+  TQueryKey extends readonly unknown[],
+> = Omit<
+  UseQueryOptions<TQueryFnData, unknown, TQueryFnData, TQueryKey>,
+  "queryKey" | "queryFn"
+>;
+
 export const useSessionQuery = (
-  options?: UseQueryOptions<
-    User | null,
-    unknown,
-    User | null,
-    typeof authQueryKeys.me
-  >,
+  options?: AuthQueryOptions<User | null, typeof authQueryKeys.me>,
 ) =>
   useQuery({
     queryKey: authQueryKeys.me,
@@ -41,9 +44,7 @@ export const useSessionQuery = (
   });
 
 export const useSignupConfigQuery = (
-  options?: UseQueryOptions<
-    SignupConfig,
-    unknown,
+  options?: AuthQueryOptions<
     SignupConfig,
     typeof authQueryKeys.signupConfig
   >,

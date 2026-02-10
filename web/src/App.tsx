@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import AppLayout from "@/layouts/AppLayout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import GuestRoute from "@/components/GuestRoute";
+import HomeRedirect from "@/components/HomeRedirect";
 import LoginPage from "@/pages/Login";
 import SignupPage from "@/pages/Signup";
 import DashboardPage from "@/pages/Dashboard";
@@ -22,7 +23,7 @@ export default function App() {
         </Route>
 
         {/* Redirects */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/" element={<HomeRedirect />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

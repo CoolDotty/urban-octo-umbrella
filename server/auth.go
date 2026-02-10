@@ -24,6 +24,7 @@ func registerAuthRoutes(router *router.Router[*core.RequestEvent], app *pocketba
 
 		return re.JSON(http.StatusOK, map[string]any{
 			"requiresInvite": total > 0,
+			"userCount":      total,
 		})
 	})
 
