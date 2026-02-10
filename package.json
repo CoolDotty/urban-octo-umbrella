@@ -10,6 +10,8 @@
     "build:web": "npm --prefix web run build",
     "build:server": "go build ./server",
     "build": "npm run build:web && npm run build:server",
+    "start": "npm run build && server.exe serve",
+    "clean": "rm -rf pb_data && rm server.exe",
     "format": "go fmt ./... && npx prettier -w .",
     "tunnel:setup": "mkdir .vscode && podman run -d -v \"./.vscode:/root/.vscode\" -v \"./:/workspace\" --name delete-me alpine:latest tail -f /dev/null",
     "tunnel:install": "podman exec -it delete-me sh -c \"apk add --no-cache curl tar bash && curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz && tar -xf vscode_cli.tar.gz -C /usr/local/bin && rm vscode_cli.tar.gz\"",
