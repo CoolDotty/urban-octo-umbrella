@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
@@ -250,6 +252,15 @@ func main() {
 
 		e.Router.GET("/auth/me", func(re *core.RequestEvent) error {
 			if re.Auth == nil {
+				if cookie, err := re.Request.Cookie(authCookieName); err == nil && cookie.Value != "" {
+					record, findErr := app.FindAuthRecordByToken(cookie.Value, core.TokenTypeAuth)
+					if findErr == nil && record != nil {
+						re.Auth = record
+					}
+				}
+			}
+
+			if re.Auth == nil {
 				return re.JSON(http.StatusUnauthorized, map[string]string{
 					"message": "Unauthorized.",
 				})
@@ -302,6 +313,11 @@ func setAuthCookie(re *core.RequestEvent, token string) {
 		Secure:   resolveCookieSecure(re.Request),
 	}
 
+	if maxAge := resolveCookieMaxAge(); maxAge > 0 {
+		cookie.MaxAge = maxAge
+		cookie.Expires = time.Now().Add(time.Duration(maxAge) * time.Second)
+	}
+
 	domain := strings.TrimSpace(os.Getenv("AUTH_COOKIE_DOMAIN"))
 	if domain != "" {
 		cookie.Domain = domain
@@ -339,4 +355,18 @@ func resolveCookieSecure(req *http.Request) bool {
 	default:
 		return req.TLS != nil
 	}
+}
+
+func resolveCookieMaxAge() int {
+	raw := strings.TrimSpace(os.Getenv("AUTH_COOKIE_TTL_DAYS"))
+	if raw == "" {
+		return 30 * 24 * 60 * 60
+	}
+
+	days, err := strconv.Atoi(raw)
+	if err != nil || days <= 0 {
+		return 0
+	}
+
+	return days * 24 * 60 * 60
 }

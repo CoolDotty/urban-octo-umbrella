@@ -41,6 +41,7 @@ async function fetchJson<T>(input: RequestInfo, init?: RequestInit) {
 }
 
 export default function App() {
+  const [path, setPath] = useState(() => window.location.pathname);
   const [user, setUser] = useState<User | null>(null);
   const [signupConfig, setSignupConfig] = useState<SignupConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -83,6 +84,20 @@ export default function App() {
   useEffect(() => {
     void loadSession();
   }, []);
+
+  useEffect(() => {
+    const handlePop = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  }, []);
+
+  const navigate = (nextPath: string) => {
+    if (nextPath === path) {
+      return;
+    }
+    window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+  };
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -177,35 +192,8 @@ export default function App() {
               Log out
             </button>
           </div>
-        ) : (
+        ) : path === "/signup" ? (
           <div className="auth-forms">
-            <form className="auth-form" onSubmit={handleLogin}>
-              <h3>Log in</h3>
-              <label>
-                Email
-                <input
-                  type="email"
-                  value={loginEmail}
-                  onChange={(event) => setLoginEmail(event.target.value)}
-                  autoComplete="email"
-                  required
-                />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  value={loginPassword}
-                  onChange={(event) => setLoginPassword(event.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              </label>
-              <button className="button" type="submit" disabled={submitting}>
-                Log in
-              </button>
-            </form>
-
             <form className="auth-form" onSubmit={handleSignup}>
               <h3>Sign up</h3>
               <label>
@@ -255,6 +243,51 @@ export default function App() {
                 </p>
               )}
               <button className="button" type="submit" disabled={submitting}>
+                Create account
+              </button>
+              <button
+                className="button outline"
+                type="button"
+                onClick={() => navigate("/")}
+                disabled={submitting}
+              >
+                Back to login
+              </button>
+            </form>
+          </div>
+        ) : (
+          <div className="auth-forms">
+            <form className="auth-form" onSubmit={handleLogin}>
+              <h3>Log in</h3>
+              <label>
+                Email
+                <input
+                  type="email"
+                  value={loginEmail}
+                  onChange={(event) => setLoginEmail(event.target.value)}
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </label>
+              <button className="button" type="submit" disabled={submitting}>
+                Log in
+              </button>
+              <button
+                className="button outline"
+                type="button"
+                onClick={() => navigate("/signup")}
+                disabled={submitting}
+              >
                 Create account
               </button>
             </form>
