@@ -1,16 +1,23 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import DashboardPage from "./pages/Dashboard";
 import LoginPage from "./pages/Login";
 import SignupPage from "./pages/Signup";
-import { fetchJson } from "./lib/fetchJson";
-import type { SignupConfig, User } from "./types/auth";
+import { useAuthError } from "./hooks/useAuthError";
+import {
+  authQueryKeys,
+  useSessionQuery,
+  useSignupConfigQuery,
+} from "./queries/authQueries";
+import {
+  useLoginMutation,
+  useLogoutMutation,
+  useSignupMutation,
+} from "./queries/authMutations";
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [signupConfig, setSignupConfig] = useState<SignupConfig | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -18,102 +25,87 @@ export default function App() {
   const [signupPassword, setSignupPassword] = useState("");
   const [signupPasswordConfirm, setSignupPasswordConfirm] = useState("");
   const [inviteToken, setInviteToken] = useState("");
-  const [submitting, setSubmitting] = useState(false);
 
   const navigate = useNavigate();
-  const location = useLocation();
+  const queryClient = useQueryClient();
 
-  const loadSession = async () => {
-    setLoading(true);
-    setError(null);
+  const { getLoginErrorMessage, getSignupErrorMessage, getLogoutErrorMessage } =
+    useAuthError(setError);
 
-    const [meResult, configResult] = await Promise.all([
-      fetch("/auth/me", { credentials: "include" }),
-      fetch("/auth/signup-config", { credentials: "include" }),
-    ]);
+  const { data: user, isLoading: isUserLoading } = useSessionQuery();
+  const {
+    data: signupConfig,
+    isLoading: isConfigLoading,
+    error: configError,
+  } = useSignupConfigQuery();
 
-    if (meResult.ok) {
-      setUser((await meResult.json()) as User);
-    } else {
-      setUser(null);
-    }
+  const loginMutation = useLoginMutation({
+    onSuccess: (data) => {
+      queryClient.setQueryData(authQueryKeys.me, data);
+      setLoginPassword("");
+      navigate("/dashboard", { replace: true });
+    },
+  });
 
-    if (configResult.ok) {
-      setSignupConfig((await configResult.json()) as SignupConfig);
-    }
+  const signupMutation = useSignupMutation({
+    onSuccess: (data) => {
+      queryClient.setQueryData(authQueryKeys.me, data);
+      setSignupPassword("");
+      setSignupPasswordConfirm("");
+      setInviteToken("");
+      navigate("/dashboard", { replace: true });
+    },
+  });
 
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    void loadSession();
-  }, []);
-
-  useEffect(() => {
-    setError(null);
-  }, [location.pathname]);
+  const logoutMutation = useLogoutMutation({
+    onSuccess: () => {
+      queryClient.setQueryData(authQueryKeys.me, null);
+      navigate("/login", { replace: true });
+    },
+  });
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setSubmitting(true);
     setError(null);
 
     try {
-      const data = await fetchJson<User>("/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
-      });
-      setUser(data);
-      setLoginPassword("");
-      navigate("/dashboard", { replace: true });
+      await loginMutation.mutateAsync({ email: loginEmail, password: loginPassword });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
-    } finally {
-      setSubmitting(false);
+      setError(getLoginErrorMessage(err));
     }
   };
 
   const handleSignup = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setSubmitting(true);
     setError(null);
 
     try {
-      const data = await fetchJson<User>("/auth/signup", {
-        method: "POST",
-        body: JSON.stringify({
-          email: signupEmail,
-          password: signupPassword,
-          passwordConfirm: signupPasswordConfirm,
-          inviteToken: inviteToken || undefined,
-        }),
+      await signupMutation.mutateAsync({
+        email: signupEmail,
+        password: signupPassword,
+        passwordConfirm: signupPasswordConfirm,
+        inviteToken: inviteToken || undefined,
       });
-      setUser(data);
-      setSignupPassword("");
-      setSignupPasswordConfirm("");
-      setInviteToken("");
-      navigate("/dashboard", { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Signup failed");
-    } finally {
-      setSubmitting(false);
+      setError(getSignupErrorMessage(err));
     }
   };
 
   const handleLogout = async () => {
-    setSubmitting(true);
     setError(null);
 
     try {
-      await fetchJson<void>("/auth/logout", { method: "POST" });
-      setUser(null);
-      navigate("/login", { replace: true });
+      await logoutMutation.mutateAsync();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Logout failed");
-    } finally {
-      setSubmitting(false);
+      setError(getLogoutErrorMessage(err));
     }
   };
+
+  const loading = isUserLoading || isConfigLoading;
+  const submitting =
+    loginMutation.isPending || signupMutation.isPending || logoutMutation.isPending;
+  const displayError =
+    error ?? (configError instanceof Error ? configError.message : null);
 
   return (
     <div className="app">
@@ -138,7 +130,7 @@ export default function App() {
               user={user}
               loading={loading}
               submitting={submitting}
-              error={error}
+              error={displayError}
               onLogout={handleLogout}
             />
           }
@@ -149,7 +141,7 @@ export default function App() {
             <LoginPage
               user={user}
               loading={loading}
-              error={error}
+              error={displayError}
               submitting={submitting}
               loginEmail={loginEmail}
               loginPassword={loginPassword}
@@ -166,7 +158,7 @@ export default function App() {
               user={user}
               loading={loading}
               signupConfig={signupConfig}
-              error={error}
+              error={displayError}
               submitting={submitting}
               signupEmail={signupEmail}
               signupPassword={signupPassword}
