@@ -96,7 +96,9 @@ input {
   border: 1px solid #e5e7eb;
   padding: 0.65rem 0.8rem;
   font-size: 0.95rem;
-  transition: border 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    border 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 input:focus {

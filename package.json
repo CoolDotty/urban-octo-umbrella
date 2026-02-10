@@ -4,15 +4,13 @@
   "private": true,
   "scripts": {
     "postinstall": "npm --prefix web install && go mod download",
-
     "dev:web": "npm --prefix web run dev",
     "dev:server": "go run ./server serve",
     "dev": "concurrently \"npm run dev:web\" \"npm run dev:server\"",
-
     "build:web": "npm --prefix web run build",
     "build:server": "go build ./server",
     "build": "npm run build:web && npm run build:server",
-    
+    "format": "go fmt ./... && npx prettier -w .",
     "tunnel:setup": "mkdir .vscode && podman run -d -v \"./.vscode:/root/.vscode\" -v \"./:/workspace\" --name delete-me alpine:latest tail -f /dev/null",
     "tunnel:install": "podman exec -it delete-me sh -c \"apk add --no-cache curl tar bash && curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz && tar -xf vscode_cli.tar.gz -C /usr/local/bin && rm vscode_cli.tar.gz\"",
     "tunnel:run": "podman exec -it delete-me sh -c \"cd /workspace && code tunnel --accept-server-license-terms --name delete-me & while [ ! -f /root/.vscode/cli/token.json ]; do sleep 1; done && pkill code\"",
@@ -20,6 +18,7 @@
     "tunnel": "npm run tunnel:setup && npm run tunnel:install && npm run tunnel:run && npm run tunnel:cleanup"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "concurrently": "^9.0.0",
+    "prettier": "^3.2.5"
   }
 }

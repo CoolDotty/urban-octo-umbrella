@@ -221,7 +221,9 @@ export default function App() {
                 <input
                   type="password"
                   value={signupPasswordConfirm}
-                  onChange={(event) => setSignupPasswordConfirm(event.target.value)}
+                  onChange={(event) =>
+                    setSignupPasswordConfirm(event.target.value)
+                  }
                   autoComplete="new-password"
                   required
                 />
