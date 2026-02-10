@@ -25,7 +25,9 @@ func main() {
 		}
 
 		registerAuthRoutes(e.Router, app)
-		registerStaticRoutes(e.Router, assets)
+		if assets != nil {
+			registerStaticRoutes(e.Router, assets)
+		}
 
 		return e.Next()
 	})

@@ -5,7 +5,7 @@
   "scripts": {
     "postinstall": "npm --prefix web install && go mod download",
     "dev:web": "npm --prefix web run dev",
-    "dev:server": "go run ./server serve",
+    "dev:server": "go run -tags=dev ./server serve",
     "dev": "concurrently \"npm run dev:web\" \"npm run dev:server\"",
     "build:web": "npm --prefix web run build",
     "build:server": "go build ./server",
