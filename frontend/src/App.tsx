@@ -8,11 +8,11 @@ type Container = {
   image?: string
   status?: string
   createdAt?: string
-  ssh?: {
-    host?: string
-    port?: string
-    user?: string
-    password?: string
+  repoPath?: string | null
+  tunnel?: {
+    name?: string
+    status?: string
+    webUrl?: string
     vscodeUri?: string
   } | null
 }
@@ -134,6 +134,40 @@ function Dashboard({ user }: { user: User }) {
     }
   }
 
+  const handleStart = async (id: string) => {
+    setBusyId(id)
+    setError(null)
+    try {
+      const response = await fetch(`/api/containers/${id}/start`, { method: 'POST' })
+      const data = await response.json()
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || 'Failed to start container')
+      }
+      await loadContainers()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start container')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleStop = async (id: string) => {
+    setBusyId(id)
+    setError(null)
+    try {
+      const response = await fetch(`/api/containers/${id}/stop`, { method: 'POST' })
+      const data = await response.json()
+      if (!response.ok || !data.ok) {
+        throw new Error(data?.error || 'Failed to stop container')
+      }
+      await loadContainers()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to stop container')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <div className="app">
       <header className="app__header">
@@ -191,21 +225,40 @@ function Dashboard({ user }: { user: User }) {
                   {container.createdAt ? (
                     <p className="card__meta">Created: {container.createdAt}</p>
                   ) : null}
-                  {container.ssh?.vscodeUri ? (
+                  {container.tunnel?.name ? (
                     <p className="card__meta">
-                      SSH: {container.ssh.user}@{container.ssh.host}:{container.ssh.port}
+                      Tunnel: {container.tunnel.name} · {container.tunnel.status || 'unknown'}
                     </p>
-                  ) : null}
-                  {container.ssh?.password ? (
-                    <p className="card__meta">Password: {container.ssh.password}</p>
                   ) : null}
                 </div>
                 <div className="card__actions">
-                  {container.ssh?.vscodeUri ? (
-                    <a className="ghost link-button" href={container.ssh.vscodeUri}>
+                  {container.tunnel?.status === 'running' && container.tunnel.webUrl ? (
+                    <a className="ghost link-button" href={container.tunnel.webUrl} target="_blank" rel="noreferrer">
+                      Open in vscode.dev
+                    </a>
+                  ) : null}
+                  {container.tunnel?.status === 'running' && container.tunnel.vscodeUri ? (
+                    <a className="ghost link-button" href={container.tunnel.vscodeUri}>
                       Open in VS Code
                     </a>
                   ) : null}
+                  {container.tunnel?.status !== 'running' ? (
+                    <button
+                      className="ghost"
+                      onClick={() => handleStart(container.id)}
+                      disabled={busyId === container.id}
+                    >
+                      {busyId === container.id ? 'Starting...' : 'Start'}
+                    </button>
+                  ) : (
+                    <button
+                      className="ghost"
+                      onClick={() => handleStop(container.id)}
+                      disabled={busyId === container.id}
+                    >
+                      {busyId === container.id ? 'Stopping...' : 'Stop'}
+                    </button>
+                  )}
                   <button
                     className="danger"
                     onClick={() => handleDelete(container.id)}

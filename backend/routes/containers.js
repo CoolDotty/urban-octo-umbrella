@@ -34,14 +34,19 @@ function runGit(args, options) {
 }
 
 var APP_LABEL = 'com.urban-octo-umbrella.managed=true';
-var SSH_USER = 'root';
-var SSH_BIND = process.env.SSH_BIND || '0.0.0.0';
-var DOMAIN_NAME = process.env.DOMAIN_NAME || 'localhost';
-var PASSWORD_LABEL = 'com.urban-octo-umbrella.ssh_password';
-var SSH_NAME_LABEL = 'com.urban-octo-umbrella.ssh_name';
 var REPO_URL_LABEL = 'com.urban-octo-umbrella.repo_url';
 var REPO_PATH_LABEL = 'com.urban-octo-umbrella.repo_path';
+var TUNNEL_NAME_LABEL = 'com.urban-octo-umbrella.tunnel_name';
 var DEFAULT_IMAGE = 'mcr.microsoft.com/devcontainers/universal:latest';
+var MAX_ACTIVE_CONTAINERS = 10;
+var TUNNEL_WEB_BASE = process.env.CODE_TUNNEL_WEB_BASE || 'https://vscode.dev/tunnel';
+var TUNNEL_ACCESS_TOKEN = process.env.CODE_TUNNEL_ACCESS_TOKEN || null;
+var TUNNEL_REFRESH_TOKEN = process.env.CODE_TUNNEL_REFRESH_TOKEN || null;
+var TUNNEL_NAME_PREFIX = process.env.CODE_TUNNEL_NAME_PREFIX || 'uou-';
+var TUNNEL_DISABLE_TELEMETRY = String(process.env.CODE_TUNNEL_DISABLE_TELEMETRY || '').toLowerCase() === 'true';
+var HOST_TUNNEL_DATA_DIR = process.env.CODE_TUNNEL_DATA_DIR_HOST || path.join(os.homedir(), '.vscode-cli');
+var CONTAINER_TUNNEL_DATA_DIR = process.env.CODE_TUNNEL_DATA_DIR_CONTAINER || '/root/.vscode-cli';
+var KEEP_FAILED_CONTAINERS = String(process.env.KEEP_FAILED_CONTAINERS || '').toLowerCase() === 'true';
 
 var ANIMALS = [
   'lizard',
@@ -76,24 +81,6 @@ var ANIMALS = [
   'coyote'
 ];
 
-function getHostForSsh(req) {
-  return process.env.SSH_HOST || DOMAIN_NAME || req.hostname || 'localhost';
-}
-
-async function getSshPort(containerId, containerPort) {
-  try {
-    var stdout = await runPodman(['port', containerId, containerPort + '/tcp']);
-    var line = String(stdout || '').trim().split('\n')[0] || '';
-    var match = line.match(/:(\d+)\s*$/);
-    if (!match) {
-      return null;
-    }
-    return match[1];
-  } catch (err) {
-    return null;
-  }
-}
-
 function getContainerLabel(container, key) {
   if (!container || !container.Labels) {
     return null;
@@ -102,10 +89,6 @@ function getContainerLabel(container, key) {
     return container.Labels[key] || null;
   }
   return null;
-}
-
-function generatePassword() {
-  return crypto.randomBytes(16).toString('hex');
 }
 
 function getRepoName(repoUrl) {
@@ -384,7 +367,7 @@ async function findDevcontainerImage(repoUrl, accessToken) {
   }
 }
 
-async function getUsedSshNames() {
+async function getUsedTunnelNames() {
   try {
     var stdout = await runPodman([
       'ps',
@@ -395,62 +378,136 @@ async function getUsedSshNames() {
     ]);
     var containers = JSON.parse(stdout || '[]');
     return new Set(containers.map(function(container) {
-      return getContainerLabel(container, SSH_NAME_LABEL);
+      return getContainerLabel(container, TUNNEL_NAME_LABEL);
     }).filter(Boolean));
   } catch (err) {
     return new Set();
   }
 }
 
-async function generateSshName() {
-  var used = await getUsedSshNames();
+async function generateTunnelName() {
+  var used = await getUsedTunnelNames();
   for (var attempt = 0; attempt < 15; attempt += 1) {
-    var candidate = randomAnimal();
+    var candidate = TUNNEL_NAME_PREFIX + randomAnimal();
     if (!used.has(candidate)) {
       return candidate;
     }
   }
-  return randomAnimal() + '-' + crypto.randomBytes(2).toString('hex');
+  return TUNNEL_NAME_PREFIX + randomAnimal() + '-' + crypto.randomBytes(2).toString('hex');
+}
+
+function isContainerRunning(container) {
+  if (!container) {
+    return false;
+  }
+  if (container.State) {
+    return String(container.State).toLowerCase() === 'running';
+  }
+  var status = String(container.Status || '').toLowerCase();
+  return status.startsWith('up');
+}
+
+function normalizeWorkspacePath(repoPath) {
+  if (!repoPath) {
+    return null;
+  }
+  var trimmed = String(repoPath).trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.startsWith('/') ? trimmed : '/' + trimmed;
+}
+
+function buildTunnelUrls(tunnelName, repoPath) {
+  if (!tunnelName) {
+    return { webUrl: null, vscodeUri: null };
+  }
+  var normalizedPath = normalizeWorkspacePath(repoPath);
+  var webBase = TUNNEL_WEB_BASE.replace(/\/+$/, '');
+  var webUrl = webBase + '/' + encodeURIComponent(tunnelName);
+  var vscodeUri = 'vscode://vscode-remote/tunnel+' + encodeURIComponent(tunnelName);
+  if (normalizedPath) {
+    var encodedPath = encodeURI(normalizedPath);
+    webUrl += encodedPath;
+    vscodeUri += encodedPath;
+  }
+  return { webUrl: webUrl, vscodeUri: vscodeUri };
+}
+
+async function getContainerRunningState(containerId) {
+  try {
+    var stdout = await runPodman(['inspect', '-f', '{{.State.Running}}', containerId]);
+    return String(stdout || '').trim() === 'true';
+  } catch (err) {
+    return false;
+  }
+}
+
+async function getContainerLogs(containerId) {
+  try {
+    var stdout = await runPodman(['logs', '--tail', '200', containerId]);
+    return String(stdout || '').trim();
+  } catch (err) {
+    return null;
+  }
+}
+
+async function getContainerExitDetails(containerId) {
+  try {
+    var stdout = await runPodman([
+      'inspect',
+      '-f',
+      '{{.State.ExitCode}} {{.State.Error}}',
+      containerId
+    ]);
+    return String(stdout || '').trim();
+  } catch (err) {
+    return null;
+  }
+}
+
+async function ensureHostDir(dirPath) {
+  if (!dirPath) {
+    return;
+  }
+  await fsPromises.mkdir(dirPath, { recursive: true });
 }
 
 router.get('/', async function(req, res) {
   try {
     var stdout = await runPodman([
       'ps',
+      '-a',
       '--filter',
       'label=com.urban-octo-umbrella.managed=true',
       '--format',
       'json'
     ]);
     var containers = JSON.parse(stdout || '[]');
+    containers.sort(function(a, b) {
+      var aTime = Date.parse(a.CreatedAt || '') || 0;
+      var bTime = Date.parse(b.CreatedAt || '') || 0;
+      return bTime - aTime;
+    });
+    containers = containers.slice(0, MAX_ACTIVE_CONTAINERS);
     var normalized = await Promise.all(containers.map(async function(container) {
-      var containerPort = '2222';
-      var sshPort = await getSshPort(container.Id, containerPort);
-      var sshHost = sshPort ? getHostForSsh(req) : null;
-      var sshUser = SSH_USER;
-      var includePort = true;
-      var sshTarget = sshPort
-        ? (sshUser + '@' + sshHost + (includePort ? ':' + sshPort : ''))
-        : null;
+      var tunnelName = getContainerLabel(container, TUNNEL_NAME_LABEL);
       var repoPath = getContainerLabel(container, REPO_PATH_LABEL);
-      var vscodeUri = null;
-      if (sshTarget) {
-        var base = 'vscode://vscode-remote/ssh-remote+' + encodeURIComponent(sshTarget);
-        vscodeUri = repoPath ? base + encodeURI(repoPath) : base;
-      }
+      var running = isContainerRunning(container);
+      var urls = running ? buildTunnelUrls(tunnelName, repoPath) : { webUrl: null, vscodeUri: null };
       return {
         id: container.Id,
         name: Array.isArray(container.Names) ? container.Names[0] : container.Names,
         image: container.Image,
         status: container.Status,
         createdAt: container.CreatedAt,
-        ssh: sshPort ? {
-          host: sshHost,
-          port: sshPort,
-          user: sshUser,
-          password: getContainerLabel(container, PASSWORD_LABEL),
-          vscodeUri: vscodeUri
-        } : null
+        tunnel: tunnelName ? {
+          name: tunnelName,
+          status: running ? 'running' : 'stopped',
+          webUrl: urls.webUrl,
+          vscodeUri: urls.vscodeUri
+        } : null,
+        repoPath: repoPath
       };
     }));
     res.json({ ok: true, containers: normalized });
@@ -465,6 +522,15 @@ router.get('/', async function(req, res) {
 
 router.post('/', async function(req, res) {
   try {
+    if (!HOST_TUNNEL_DATA_DIR && !TUNNEL_ACCESS_TOKEN && !TUNNEL_REFRESH_TOKEN) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing CODE_TUNNEL_DATA_DIR_HOST or CODE_TUNNEL_ACCESS_TOKEN/CODE_TUNNEL_REFRESH_TOKEN for tunnel auth'
+      });
+    }
+    if (HOST_TUNNEL_DATA_DIR) {
+      await ensureHostDir(HOST_TUNNEL_DATA_DIR);
+    }
     var repoUrl = req.body && req.body.repoUrl ? String(req.body.repoUrl).trim() : '';
     if (repoUrl === '') {
       repoUrl = null;
@@ -482,67 +548,127 @@ router.post('/', async function(req, res) {
     var devcontainerImage = repoUrl ? await findDevcontainerImage(repoUrl, accessToken) : null;
     var imageToUse = devcontainerImage || DEFAULT_IMAGE;
 
-    var sshName = await generateSshName();
-    var name = sshName;
-    var password = generatePassword();
-    var sshdPort = '2222';
+    var tunnelName = await generateTunnelName();
+    var name = tunnelName;
     var args = [
       'run',
       '-d',
       '--name',
       name,
       '--hostname',
-      sshName,
+      tunnelName,
       '--label',
       APP_LABEL,
       '--label',
-      PASSWORD_LABEL + '=' + password,
-      '--label',
-      SSH_NAME_LABEL + '=' + sshName,
+      TUNNEL_NAME_LABEL + '=' + tunnelName
     ];
+    if (HOST_TUNNEL_DATA_DIR) {
+      args.push('-v', HOST_TUNNEL_DATA_DIR + ':' + CONTAINER_TUNNEL_DATA_DIR);
+    }
+    if (TUNNEL_ACCESS_TOKEN) {
+      args.push('-e', 'VSCODE_CLI_ACCESS_TOKEN=' + TUNNEL_ACCESS_TOKEN);
+    }
+    if (TUNNEL_REFRESH_TOKEN) {
+      args.push('-e', 'VSCODE_CLI_REFRESH_TOKEN=' + TUNNEL_REFRESH_TOKEN);
+    }
     if (repoUrl && repoDir) {
       args.push('--label', REPO_URL_LABEL + '=' + repoUrl);
       args.push('--label', REPO_PATH_LABEL + '=' + repoDir);
     }
-    args.push('--publish', SSH_BIND + '::' + sshdPort);
     args = args.concat([
       '--pull=missing',
       imageToUse,
       'sh',
       '-c',
       'set -e; ' +
-        'if ! command -v sshd >/dev/null 2>&1; then ' +
-          'if command -v apt-get >/dev/null 2>&1; then ' +
-            'apt-get update && apt-get install -y openssh-server; ' +
-          'elif command -v apk >/dev/null 2>&1; then ' +
-            'apk add --no-cache openssh-server; ' +
-          'elif command -v dnf >/dev/null 2>&1; then ' +
-            'dnf -y install openssh-server; ' +
-          'elif command -v yum >/dev/null 2>&1; then ' +
-            'yum -y install openssh-server; ' +
+        'mkdir -p "' + CONTAINER_TUNNEL_DATA_DIR + '"; ' +
+        'export VSCODE_CLI_DATA_DIR="' + CONTAINER_TUNNEL_DATA_DIR + '"; ' +
+        'code_bin="/opt/vscode-cli/code"; ' +
+        'if [ ! -x "$code_bin" ] && [ -x "/opt/vscode-cli/bin/code" ]; then ' +
+          'code_bin="/opt/vscode-cli/bin/code"; ' +
+        'fi; ' +
+        'if [ ! -x "$code_bin" ]; then ' +
+          'if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then ' +
+            'if command -v apt-get >/dev/null 2>&1; then ' +
+              'apt-get update; ' +
+              'apt-get install -y curl ca-certificates tar; ' +
+            'elif command -v apk >/dev/null 2>&1; then ' +
+              'apk add --no-cache curl ca-certificates tar; ' +
+            'elif command -v dnf >/dev/null 2>&1; then ' +
+              'dnf -y install curl ca-certificates tar; ' +
+            'elif command -v yum >/dev/null 2>&1; then ' +
+              'yum -y install curl ca-certificates tar; ' +
+            'fi; ' +
+          'fi; ' +
+          'if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then ' +
+            'echo "curl and tar are required to install the VS Code CLI." >&2; ' +
+            'exit 1; ' +
+          'fi; ' +
+          'arch=$(uname -m); ' +
+          'case "$arch" in ' +
+            'x86_64) platform=alpine-x64 ;; ' +
+            'aarch64|arm64) platform=alpine-arm64 ;; ' +
+            'armv7l) platform=alpine-armhf ;; ' +
+            '*) echo "Unsupported CPU architecture: $arch" >&2; exit 1 ;; ' +
+          'esac; ' +
+          'mkdir -p /opt/vscode-cli; ' +
+          'curl -fSL "https://code.visualstudio.com/sha/download?build=stable&os=cli-$platform" -o /tmp/vscode-cli.tar.gz; ' +
+          'tar -xzf /tmp/vscode-cli.tar.gz -C /opt/vscode-cli; ' +
+          'rm -f /tmp/vscode-cli.tar.gz; ' +
+          'chmod +x /opt/vscode-cli/code /opt/vscode-cli/bin/code 2>/dev/null || true; ' +
+          'if [ -x "/opt/vscode-cli/code" ]; then ' +
+            'code_bin="/opt/vscode-cli/code"; ' +
+          'elif [ -x "/opt/vscode-cli/bin/code" ]; then ' +
+            'code_bin="/opt/vscode-cli/bin/code"; ' +
           'fi; ' +
         'fi; ' +
-        'if command -v sshd >/dev/null 2>&1; then ' +
-          'echo \'' + SSH_USER + ':' + password + '\' | chpasswd; ' +
-          'mkdir -p /etc/ssh/sshd_config.d; ' +
-          'cat > /etc/ssh/sshd_config.d/99-uou.conf <<EOF\n' +
-          'Port ' + sshdPort + '\n' +
-          'PasswordAuthentication yes\n' +
-          'KbdInteractiveAuthentication yes\n' +
-          'ChallengeResponseAuthentication yes\n' +
-          'PermitRootLogin yes\n' +
-          'UsePAM yes\n' +
-          'EOF\n' +
-          'mkdir -p /var/run/sshd; ' +
-          'ssh-keygen -A; ' +
-          '/usr/sbin/sshd -D -e -p ' + sshdPort + '; ' +
-        'else ' +
-          'sleep 3600; ' +
-        'fi'
+        'if [ ! -x "$code_bin" ]; then ' +
+          'echo "VS Code CLI (code) could not be installed." >&2; ' +
+          'exit 1; ' +
+        'fi; ' +
+        '"$code_bin" tunnel --accept-server-license-terms --name "' + tunnelName + '"' +
+          (TUNNEL_DISABLE_TELEMETRY ? ' --disable-telemetry' : '') +
+          ' --log info'
     ]);
     var stdout = await runPodman(args);
     var id = String(stdout || '').trim();
+    var running = await getContainerRunningState(id);
+    if (!running) {
+      var logs = await getContainerLogs(id);
+      var exitDetails = await getContainerExitDetails(id);
+      if (!KEEP_FAILED_CONTAINERS) {
+        try {
+          await runPodman(['rm', '-f', id]);
+        } catch (_) {
+          // ignore cleanup failure
+        }
+      }
+      return res.status(500).json({
+        ok: false,
+        error: 'Container failed to start tunnel',
+        details: logs || exitDetails || 'Container exited during startup',
+        id: KEEP_FAILED_CONTAINERS ? id : undefined
+      });
+    }
     if (repoUrl && repoDir) {
+      var stillRunning = await getContainerRunningState(id);
+      if (!stillRunning) {
+        var stoppedLogs = await getContainerLogs(id);
+        var stoppedExit = await getContainerExitDetails(id);
+        if (!KEEP_FAILED_CONTAINERS) {
+          try {
+            await runPodman(['rm', '-f', id]);
+          } catch (_) {
+            // ignore cleanup failure
+          }
+        }
+        return res.status(500).json({
+          ok: false,
+          error: 'Container stopped before repo clone',
+          details: stoppedLogs || stoppedExit || 'Container exited during startup',
+          id: KEEP_FAILED_CONTAINERS ? id : undefined
+        });
+      }
       try {
         await runPodman(['exec', id, 'mkdir', '-p', '/root/workspace']);
         if (accessToken) {
@@ -585,6 +711,34 @@ router.post('/', async function(req, res) {
     res.status(500).json({
       ok: false,
       error: 'Failed to start container',
+      details: err.stderr ? String(err.stderr).trim() : String(err.message || err)
+    });
+  }
+});
+
+router.post('/:id/start', async function(req, res) {
+  var id = req.params.id;
+  try {
+    await runPodman(['start', id]);
+    res.json({ ok: true, id: id });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: 'Failed to start container',
+      details: err.stderr ? String(err.stderr).trim() : String(err.message || err)
+    });
+  }
+});
+
+router.post('/:id/stop', async function(req, res) {
+  var id = req.params.id;
+  try {
+    await runPodman(['stop', id]);
+    res.json({ ok: true, id: id });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: 'Failed to stop container',
       details: err.stderr ? String(err.stderr).trim() : String(err.message || err)
     });
   }
