@@ -15,6 +15,7 @@ go.work
 go.work.sum
 vendor/
 bin/
+server/web/
 
 ############################
 # Node / npm
@@ -31,8 +32,6 @@ pnpm-lock.yaml
 .pnp.*
 .cache/
 dist/
-!server/web/dist/
-!server/web/dist/index.html
 build/
 out/
 .parcel-cache/
