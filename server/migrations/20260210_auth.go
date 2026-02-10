@@ -38,9 +38,10 @@ func init() {
 		}
 
 		if users.Fields.GetByName("role") == nil {
-			users.Fields.Add(&core.TextField{
-				Name: "role",
-				Max:  50,
+			users.Fields.Add(&core.SelectField{
+				Name:      "role",
+				Values:    []string{"admin", "user"},
+				MaxSelect: 1,
 			})
 		}
 

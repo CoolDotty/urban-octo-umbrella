@@ -1,61 +1,66 @@
-import { useMemo } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
-import LoadingCard from "../../components/LoadingCard";
-import type { SignupConfig, User } from "../../types/auth";
-import type { FormEvent } from "react";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import LoadingCard from "@/components/LoadingCard";
+import { useAuth } from "@/context/AuthContext";
+import { useAuthError } from "@/hooks/useAuthError";
+import { useSignupMutation } from "@/api/authMutations";
+import { useSignupConfigQuery } from "@/api/authQueries";
+import styles from "./Signup.module.css";
 
-type SignupPageProps = {
-  user: User | null;
-  loading: boolean;
-  signupConfig: SignupConfig | null;
-  error: string | null;
-  submitting: boolean;
-  signupEmail: string;
-  signupPassword: string;
-  signupPasswordConfirm: string;
-  inviteToken: string;
-  onSignup: (event: FormEvent<HTMLFormElement>) => void;
-  setSignupEmail: (value: string) => void;
-  setSignupPassword: (value: string) => void;
-  setSignupPasswordConfirm: (value: string) => void;
-  setInviteToken: (value: string) => void;
-};
-
-export default function SignupPage({
-  user,
-  loading,
-  signupConfig,
-  error,
-  submitting,
-  signupEmail,
-  signupPassword,
-  signupPasswordConfirm,
-  inviteToken,
-  onSignup,
-  setSignupEmail,
-  setSignupPassword,
-  setSignupPasswordConfirm,
-  setInviteToken,
-}: SignupPageProps) {
+export default function SignupPage() {
+  const [error, setError] = useState<string | null>(null);
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupPasswordConfirm, setSignupPasswordConfirm] = useState("");
+  const [inviteToken, setInviteToken] = useState("");
+  const { setUser } = useAuth();
+  const { getSignupErrorMessage } = useAuthError(setError);
   const navigate = useNavigate();
+  const {
+    data: signupConfig,
+    isLoading: isConfigLoading,
+    error: configError,
+  } = useSignupConfigQuery();
+  const signupMutation = useSignupMutation({
+    onSuccess: (data) => {
+      setUser(data);
+      setSignupPassword("");
+      setSignupPasswordConfirm("");
+      setInviteToken("");
+      navigate("/dashboard", { replace: true });
+    },
+  });
+  const submitting = signupMutation.isPending;
   const requiresInvite = useMemo(
     () => signupConfig?.requiresInvite ?? false,
     [signupConfig],
   );
 
-  if (loading) {
+  if (isConfigLoading) {
     return <LoadingCard />;
   }
 
-  if (user) {
-    return <Navigate to="/dashboard" replace />;
-  }
-
   return (
-    <section className="card auth-card">
+    <section className={styles.card}>
       <h2>Signup</h2>
-      <div className="auth-forms">
-        <form className="auth-form" onSubmit={onSignup}>
+      <div className={styles.forms}>
+        <form
+          className={styles.form}
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setError(null);
+            try {
+              await signupMutation.mutateAsync({
+                email: signupEmail,
+                password: signupPassword,
+                passwordConfirm: signupPasswordConfirm,
+                inviteToken: inviteToken || undefined,
+              });
+            } catch (err) {
+              setError(getSignupErrorMessage(err));
+            }
+          }}
+        >
           <h3>Sign up</h3>
           <label>
             Email
@@ -119,6 +124,9 @@ export default function SignupPage({
         </form>
       </div>
       {error ? <p className="error">{error}</p> : null}
+      {!error && configError instanceof Error ? (
+        <p className="error">{configError.message}</p>
+      ) : null}
     </section>
   );
 }

@@ -1,6 +1,7 @@
-import axios from "axios";
+import { isAxiosError } from "axios";
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import type { SignupConfig, User } from "../types/auth";
+import type { SignupConfig, User } from "@/types/auth";
+import apiClient from "./client";
 
 export const authQueryKeys = {
   me: ["me"] as const,
@@ -9,12 +10,10 @@ export const authQueryKeys = {
 
 const fetchMe = async () => {
   try {
-    const response = await axios.get<User>("/auth/me", {
-      withCredentials: true,
-    });
+    const response = await apiClient.get<User>("/auth/me");
     return response.data;
   } catch (err) {
-    if (axios.isAxiosError(err) && err.response?.status === 401) {
+    if (isAxiosError(err) && err.response?.status === 401) {
       return null;
     }
     throw err;
@@ -22,14 +21,17 @@ const fetchMe = async () => {
 };
 
 const fetchSignupConfig = async () => {
-  const response = await axios.get<SignupConfig>("/auth/signup-config", {
-    withCredentials: true,
-  });
+  const response = await apiClient.get<SignupConfig>("/auth/signup-config");
   return response.data;
 };
 
 export const useSessionQuery = (
-  options?: UseQueryOptions<User | null, unknown, User | null, typeof authQueryKeys.me>,
+  options?: UseQueryOptions<
+    User | null,
+    unknown,
+    User | null,
+    typeof authQueryKeys.me
+  >,
 ) =>
   useQuery({
     queryKey: authQueryKeys.me,
@@ -39,7 +41,12 @@ export const useSessionQuery = (
   });
 
 export const useSignupConfigQuery = (
-  options?: UseQueryOptions<SignupConfig, unknown, SignupConfig, typeof authQueryKeys.signupConfig>,
+  options?: UseQueryOptions<
+    SignupConfig,
+    unknown,
+    SignupConfig,
+    typeof authQueryKeys.signupConfig
+  >,
 ) =>
   useQuery({
     queryKey: authQueryKeys.signupConfig,

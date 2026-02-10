@@ -1,46 +1,45 @@
-import { Navigate, useNavigate } from "react-router-dom";
-import LoadingCard from "../../components/LoadingCard";
-import type { User } from "../../types/auth";
-import type { FormEvent } from "react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { useAuthError } from "@/hooks/useAuthError";
+import { useLoginMutation } from "@/api/authMutations";
+import styles from "./Login.module.css";
 
-type LoginPageProps = {
-  user: User | null;
-  loading: boolean;
-  error: string | null;
-  submitting: boolean;
-  loginEmail: string;
-  loginPassword: string;
-  onLogin: (event: FormEvent<HTMLFormElement>) => void;
-  setLoginEmail: (value: string) => void;
-  setLoginPassword: (value: string) => void;
-};
-
-export default function LoginPage({
-  user,
-  loading,
-  error,
-  submitting,
-  loginEmail,
-  loginPassword,
-  onLogin,
-  setLoginEmail,
-  setLoginPassword,
-}: LoginPageProps) {
+export default function LoginPage() {
+  const [error, setError] = useState<string | null>(null);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const { setUser } = useAuth();
+  const { getLoginErrorMessage } = useAuthError(setError);
   const navigate = useNavigate();
-
-  if (loading) {
-    return <LoadingCard />;
-  }
-
-  if (user) {
-    return <Navigate to="/dashboard" replace />;
-  }
+  const loginMutation = useLoginMutation({
+    onSuccess: (data) => {
+      setUser(data);
+      setLoginPassword("");
+      navigate("/dashboard", { replace: true });
+    },
+  });
+  const submitting = loginMutation.isPending;
 
   return (
-    <section className="card auth-card">
+    <section className={styles.card}>
       <h2>Login</h2>
-      <div className="auth-forms">
-        <form className="auth-form" onSubmit={onLogin}>
+      <div className={styles.forms}>
+        <form
+          className={styles.form}
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setError(null);
+            try {
+              await loginMutation.mutateAsync({
+                email: loginEmail,
+                password: loginPassword,
+              });
+            } catch (err) {
+              setError(getLoginErrorMessage(err));
+            }
+          }}
+        >
           <h3>Log in</h3>
           <label>
             Email
