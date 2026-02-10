@@ -13,6 +13,10 @@ func main() {
 	app := pocketbase.New()
 
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
+		// Disable prompt to create superuser on first run
+		// If the end user really wants to they can do it with the CLI
+		e.InstallerFunc = nil
+
 		bindAuthCookieMiddleware(e.Router)
 
 		assets, err := loadAssets()

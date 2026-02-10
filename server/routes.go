@@ -22,7 +22,7 @@ func bindAuthCookieMiddleware(router *router.Router[*core.RequestEvent]) {
 }
 
 func registerStaticRoutes(router *router.Router[*core.RequestEvent], assets *spaAssets) {
-	router.GET("/*", func(re *core.RequestEvent) error {
+	router.GET("/{path...}", func(re *core.RequestEvent) error {
 		path := strings.TrimPrefix(re.Request.URL.Path, "/")
 		if path == "" {
 			path = "index.html"

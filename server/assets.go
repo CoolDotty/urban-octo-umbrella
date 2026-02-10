@@ -5,7 +5,7 @@ import (
 	"io/fs"
 )
 
-//go:embed web/dist/*
+//go:embed all:web/dist
 var embeddedFiles embed.FS
 
 type spaAssets struct {
