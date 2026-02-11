@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import LoadingCard from "@/components/LoadingCard";
-import { useAuth } from "@/context/AuthContext";
+import { useAuth } from "@/context/useAuth";
 import { useAuthError } from "@/hooks/useAuthError";
 import { useSignupMutation } from "@/api/authMutations";
 import { useSignupConfigQuery } from "@/api/authQueries";
