@@ -14,7 +14,7 @@
     "clean": "rm -rf pb_data && rm server.exe",
     "format": "go fmt ./... && npx prettier -w .",
     "lint:go": "golangci-lint run ./...",
-    "lint:web": "npm --prefix web run lint",
+    "lint:web": "npm --prefix web run lint && npm --prefix web run typecheck",
     "lint": "npm run lint:go && npm run lint:web",
     "tunnel:setup": "mkdir .vscode && podman run -d -v \"./.vscode:/root/.vscode\" -v \"./:/workspace\" --name delete-me alpine:latest tail -f /dev/null",
     "tunnel:install": "podman exec -it delete-me sh -c \"apk add --no-cache curl tar bash && curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz && tar -xf vscode_cli.tar.gz -C /usr/local/bin && rm vscode_cli.tar.gz\"",

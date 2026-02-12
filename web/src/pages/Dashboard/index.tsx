@@ -88,6 +88,10 @@ export default function DashboardPage() {
     ? getPodmanContainersErrorMessage(containersError)
     : null;
 
+  if (!user) {
+    return null;
+  }
+
   return (
     <section className={styles.card}>
       <h2>Dashboard</h2>
