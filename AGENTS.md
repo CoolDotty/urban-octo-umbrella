@@ -1,6 +1,6 @@
 This app lets a developer run and manage dev environments in the cloud using containers.
 
-make sure you run `npm run lint` when finalizing changes
+run `npm run lint` when finalizing changes
 
 # Project Structure
 
