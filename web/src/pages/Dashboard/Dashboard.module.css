@@ -102,6 +102,12 @@
   color: #6b7280;
 }
 
+.containerActions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
 .statusPill {
   background: #111827;
   color: #ffffff;

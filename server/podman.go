@@ -18,8 +18,12 @@ import (
 var errPodmanUnavailable = errors.New("podman not available")
 
 const (
-	podmanUnavailableMessage = "Podman is not available on the server."
-	podmanLoadFailedMessage  = "Failed to load Podman containers."
+	podmanUnavailableMessage       = "Podman is not available on the server."
+	podmanLoadFailedMessage        = "Failed to load Podman containers."
+	podmanRunFailedMessage         = "Failed to run container."
+	podmanStopFailedMessage        = "Failed to stop container."
+	podmanDeleteFailedMessage      = "Failed to delete container."
+	podmanContainerNotFoundMessage = "Container not found."
 )
 
 const (
@@ -286,6 +290,114 @@ func registerPodmanRoutes(rtr *router.Router[*core.RequestEvent], svc *podmanSer
 				return nil
 			}
 		}
+	})
+
+	rtr.POST("/podman/containers/{id}/stop", func(re *core.RequestEvent) error {
+		if re.Auth == nil {
+			return re.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "Unauthorized.",
+			})
+		}
+
+		containerID := strings.TrimSpace(re.Request.PathValue("id"))
+		if containerID == "" {
+			return re.JSON(http.StatusBadRequest, map[string]string{
+				"message": "Container id is required.",
+			})
+		}
+
+		if err := svc.stopContainer(containerID); err != nil {
+			switch {
+			case errors.Is(err, errPodmanUnavailable):
+				return re.JSON(http.StatusServiceUnavailable, map[string]string{
+					"message": podmanUnavailableMessage,
+				})
+			case errors.Is(err, errPodmanContainerNotFound):
+				return re.JSON(http.StatusNotFound, map[string]string{
+					"message": podmanContainerNotFoundMessage,
+				})
+			default:
+				return re.JSON(http.StatusInternalServerError, map[string]string{
+					"message": podmanStopFailedMessage,
+				})
+			}
+		}
+
+		return re.JSON(http.StatusOK, map[string]string{
+			"status": "stopped",
+		})
+	})
+
+	rtr.POST("/podman/containers/{id}/start", func(re *core.RequestEvent) error {
+		if re.Auth == nil {
+			return re.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "Unauthorized.",
+			})
+		}
+
+		containerID := strings.TrimSpace(re.Request.PathValue("id"))
+		if containerID == "" {
+			return re.JSON(http.StatusBadRequest, map[string]string{
+				"message": "Container id is required.",
+			})
+		}
+
+		if err := svc.startContainer(containerID); err != nil {
+			switch {
+			case errors.Is(err, errPodmanUnavailable):
+				return re.JSON(http.StatusServiceUnavailable, map[string]string{
+					"message": podmanUnavailableMessage,
+				})
+			case errors.Is(err, errPodmanContainerNotFound):
+				return re.JSON(http.StatusNotFound, map[string]string{
+					"message": podmanContainerNotFoundMessage,
+				})
+			default:
+				return re.JSON(http.StatusInternalServerError, map[string]string{
+					"message": podmanRunFailedMessage,
+				})
+			}
+		}
+
+		return re.JSON(http.StatusOK, map[string]string{
+			"status": "running",
+		})
+	})
+
+	rtr.DELETE("/podman/containers/{id}", func(re *core.RequestEvent) error {
+		if re.Auth == nil {
+			return re.JSON(http.StatusUnauthorized, map[string]string{
+				"message": "Unauthorized.",
+			})
+		}
+
+		containerID := strings.TrimSpace(re.Request.PathValue("id"))
+		if containerID == "" {
+			return re.JSON(http.StatusBadRequest, map[string]string{
+				"message": "Container id is required.",
+			})
+		}
+
+		if err := svc.deleteContainer(containerID); err != nil {
+			switch {
+			case errors.Is(err, errPodmanUnavailable):
+				return re.JSON(http.StatusServiceUnavailable, map[string]string{
+					"message": podmanUnavailableMessage,
+				})
+			case errors.Is(err, errPodmanContainerNotFound):
+				return re.JSON(http.StatusNotFound, map[string]string{
+					"message": podmanContainerNotFoundMessage,
+				})
+			default:
+				return re.JSON(http.StatusInternalServerError, map[string]string{
+					"message": podmanDeleteFailedMessage,
+				})
+			}
+		}
+
+		return re.JSON(http.StatusOK, map[string]string{
+			"status": "deleted",
+		})
 	})
 
 	registerWorkspaceRoutes(rtr, svc)

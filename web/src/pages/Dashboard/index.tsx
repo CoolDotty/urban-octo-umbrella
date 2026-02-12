@@ -4,7 +4,13 @@ import { useAuthError } from "@/hooks/useAuthError";
 import { useLogoutMutation } from "@/api/authMutations";
 import {
   getCreateWorkspaceErrorMessage,
+  getDeleteContainerErrorMessage,
+  getStartContainerErrorMessage,
+  getStopContainerErrorMessage,
+  useDeleteContainerMutation,
   useCreateWorkspaceMutation,
+  useStartContainerMutation,
+  useStopContainerMutation,
 } from "@/api/podmanMutations";
 import {
   getPodmanContainersErrorMessage,
@@ -17,6 +23,18 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [workspaceSuccess, setWorkspaceSuccess] = useState<string | null>(null);
+  const [containerActionError, setContainerActionError] = useState<string | null>(
+    null,
+  );
+  const [activeStopContainerId, setActiveStopContainerId] = useState<string | null>(
+    null,
+  );
+  const [activeStartContainerId, setActiveStartContainerId] = useState<
+    string | null
+  >(null);
+  const [activeDeleteContainerId, setActiveDeleteContainerId] = useState<
+    string | null
+  >(null);
   const [repoUrl, setRepoUrl] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
   const [autoStart, setAutoStart] = useState(true);
@@ -43,6 +61,24 @@ export default function DashboardPage() {
       setWorkspaceSuccess(
         `Workspace ${data.name} created with status ${data.status}.`,
       );
+      void refetchContainers();
+    },
+  });
+  const stopContainerMutation = useStopContainerMutation({
+    onSuccess: () => {
+      setContainerActionError(null);
+      void refetchContainers();
+    },
+  });
+  const startContainerMutation = useStartContainerMutation({
+    onSuccess: () => {
+      setContainerActionError(null);
+      void refetchContainers();
+    },
+  });
+  const deleteContainerMutation = useDeleteContainerMutation({
+    onSuccess: () => {
+      setContainerActionError(null);
       void refetchContainers();
     },
   });
@@ -155,6 +191,9 @@ export default function DashboardPage() {
         {containerErrorMessage ? (
           <p className="error">{containerErrorMessage}</p>
         ) : null}
+        {containerActionError ? (
+          <p className="error">{containerActionError}</p>
+        ) : null}
         {streamError ? <p className="error">{streamError}</p> : null}
         {!containersLoading &&
         !containerErrorMessage &&
@@ -167,9 +206,33 @@ export default function DashboardPage() {
           <div className={styles.containerList}>
             {containers.map((container, index) => {
               const key = container.id || container.name || `container-${index}`;
+              const actionContainerId = container.id || container.name;
               const displayName =
                 container.name ||
                 (container.id ? container.id.slice(0, 12) : "Unnamed");
+              const stopping =
+                actionContainerId !== undefined &&
+                actionContainerId !== "" &&
+                activeStopContainerId === actionContainerId &&
+                stopContainerMutation.isPending;
+              const starting =
+                actionContainerId !== undefined &&
+                actionContainerId !== "" &&
+                activeStartContainerId === actionContainerId &&
+                startContainerMutation.isPending;
+              const deleting =
+                actionContainerId !== undefined &&
+                actionContainerId !== "" &&
+                activeDeleteContainerId === actionContainerId &&
+                deleteContainerMutation.isPending;
+              const statusText = (container.status || "").trim().toLowerCase();
+              const canRun =
+                statusText.includes("stopped") ||
+                statusText.includes("exited") ||
+                statusText.includes("created") ||
+                statusText === "configured";
+              const actionsDisabled =
+                !actionContainerId || stopping || starting || deleting;
 
               return (
                 <div className={styles.containerCard} key={key}>
@@ -181,6 +244,82 @@ export default function DashboardPage() {
                     <span className={styles.statusPill}>
                       {container.status || "Unknown"}
                     </span>
+                  </div>
+                  <div className={styles.containerActions}>
+                    {canRun ? (
+                      <button
+                        className="button outline"
+                        type="button"
+                        disabled={actionsDisabled}
+                        onClick={async () => {
+                          if (!actionContainerId) {
+                            return;
+                          }
+                          setContainerActionError(null);
+                          setActiveStartContainerId(actionContainerId);
+                          try {
+                            await startContainerMutation.mutateAsync({
+                              containerId: actionContainerId,
+                            });
+                          } catch (err) {
+                            setContainerActionError(
+                              getStartContainerErrorMessage(err),
+                            );
+                          } finally {
+                            setActiveStartContainerId(null);
+                          }
+                        }}
+                      >
+                        {starting ? "Running..." : "Run"}
+                      </button>
+                    ) : (
+                      <button
+                        className="button outline"
+                        type="button"
+                        disabled={actionsDisabled}
+                        onClick={async () => {
+                          if (!actionContainerId) {
+                            return;
+                          }
+                          setContainerActionError(null);
+                          setActiveStopContainerId(actionContainerId);
+                          try {
+                            await stopContainerMutation.mutateAsync({
+                              containerId: actionContainerId,
+                            });
+                          } catch (err) {
+                            setContainerActionError(getStopContainerErrorMessage(err));
+                          } finally {
+                            setActiveStopContainerId(null);
+                          }
+                        }}
+                      >
+                        {stopping ? "Stopping..." : "Stop"}
+                      </button>
+                    )}
+                    <button
+                      className="button"
+                      type="button"
+                      disabled={actionsDisabled}
+                      onClick={async () => {
+                        if (!actionContainerId) {
+                          return;
+                        }
+                        setContainerActionError(null);
+                        setActiveDeleteContainerId(actionContainerId);
+                        try {
+                          await deleteContainerMutation.mutateAsync({
+                            containerId: actionContainerId,
+                          });
+                        } catch (err) {
+                          setContainerActionError(getDeleteContainerErrorMessage(err));
+                        } finally {
+                          setActiveDeleteContainerId(null);
+                        }
+                      }}
+                    >
+                      {deleting ? "Deleting..." : "Delete"}
+                    </button>
                   </div>
                   <div className={styles.containerMeta}>
                     {container.createdAt ? (
