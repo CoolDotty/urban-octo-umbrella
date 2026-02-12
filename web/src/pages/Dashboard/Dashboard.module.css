@@ -35,6 +35,36 @@
   gap: 1rem;
 }
 
+.workspaceForm {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.9rem;
+  color: #374151;
+}
+
+.checkbox input {
+  width: 1rem;
+  height: 1rem;
+}
+
+.workspaceActions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.success {
+  margin-top: 0.25rem;
+  color: #065f46;
+  font-weight: 600;
+}
+
 .sectionHeader {
   display: flex;
   align-items: center;

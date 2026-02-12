@@ -197,7 +197,9 @@ func (c *podmanClient) writePump() {
 			if !ok {
 				return
 			}
-			c.conn.SetWriteDeadline(time.Now().Add(podmanWriteTimeout))
+			if err := c.conn.SetWriteDeadline(time.Now().Add(podmanWriteTimeout)); err != nil {
+				return
+			}
 			if err := c.conn.WriteJSON(msg); err != nil {
 				return
 			}
@@ -285,6 +287,8 @@ func registerPodmanRoutes(rtr *router.Router[*core.RequestEvent], svc *podmanSer
 			}
 		}
 	})
+
+	registerWorkspaceRoutes(rtr, svc)
 }
 
 func stripHostPort(host string) string {

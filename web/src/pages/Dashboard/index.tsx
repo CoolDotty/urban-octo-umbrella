@@ -3,6 +3,10 @@ import { useAuth } from "@/context/useAuth";
 import { useAuthError } from "@/hooks/useAuthError";
 import { useLogoutMutation } from "@/api/authMutations";
 import {
+  getCreateWorkspaceErrorMessage,
+  useCreateWorkspaceMutation,
+} from "@/api/podmanMutations";
+import {
   getPodmanContainersErrorMessage,
   usePodmanContainersQuery,
 } from "@/api/podmanQueries";
@@ -11,6 +15,11 @@ import styles from "./Dashboard.module.css";
 
 export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspaceSuccess, setWorkspaceSuccess] = useState<string | null>(null);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [autoStart, setAutoStart] = useState(true);
   const { user, setUser } = useAuth();
   const { getLogoutErrorMessage } = useAuthError(setError);
   const { streamError } = usePodmanContainersStream(Boolean(user));
@@ -28,7 +37,17 @@ export default function DashboardPage() {
       setUser(null);
     },
   });
+  const createWorkspaceMutation = useCreateWorkspaceMutation({
+    onSuccess: (data) => {
+      setWorkspaceError(null);
+      setWorkspaceSuccess(
+        `Workspace ${data.name} created with status ${data.status}.`,
+      );
+      void refetchContainers();
+    },
+  });
   const submitting = logoutMutation.isPending;
+  const creatingWorkspace = createWorkspaceMutation.isPending;
   const containerErrorMessage = containersError
     ? getPodmanContainersErrorMessage(containersError)
     : null;
@@ -44,6 +63,80 @@ export default function DashboardPage() {
         </div>
         <span className={styles.pill}>{user.role}</span>
       </div>
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <h3>Create Workspace</h3>
+        </div>
+        <form
+          className={styles.workspaceForm}
+          onSubmit={async (event) => {
+            event.preventDefault();
+            setWorkspaceError(null);
+            setWorkspaceSuccess(null);
+
+            const payload: {
+              repoUrl: string;
+              name?: string;
+              ref?: string;
+              autoStart?: boolean;
+            } = {
+              repoUrl: repoUrl.trim(),
+            };
+
+            const trimmedName = workspaceName.trim();
+            if (trimmedName) {
+              payload.name = trimmedName;
+            }
+
+            if (!autoStart) {
+              payload.autoStart = false;
+            }
+
+            try {
+              await createWorkspaceMutation.mutateAsync(payload);
+            } catch (err) {
+              setWorkspaceError(getCreateWorkspaceErrorMessage(err));
+            }
+          }}
+        >
+          <label>
+            Repo URL
+            <input
+              type="url"
+              value={repoUrl}
+              onChange={(event) => setRepoUrl(event.target.value)}
+              placeholder="https://github.com/org/repo.git"
+              required
+            />
+          </label>
+          <label>
+            Name (optional)
+            <input
+              type="text"
+              value={workspaceName}
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              placeholder="my-workspace"
+            />
+          </label>
+          <label className={styles.checkbox}>
+            <input
+              type="checkbox"
+              checked={autoStart}
+              onChange={(event) => setAutoStart(event.target.checked)}
+            />
+            Auto start container
+          </label>
+          <div className={styles.workspaceActions}>
+            <button className="button" type="submit" disabled={creatingWorkspace}>
+              {creatingWorkspace ? "Creating..." : "Create workspace"}
+            </button>
+          </div>
+        </form>
+        {workspaceError ? <p className="error">{workspaceError}</p> : null}
+        {workspaceSuccess ? (
+          <p className={styles.success}>{workspaceSuccess}</p>
+        ) : null}
+      </section>
       <section className={styles.section}>
         <div className={styles.sectionHeader}>
           <h3>Containers</h3>
