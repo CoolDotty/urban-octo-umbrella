@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,8 +29,8 @@ const (
 )
 
 var (
-	deviceCodePattern = regexp.MustCompile(`(?i)\b(?:enter\s+(?:the\s+)?)?(?:device\s*code|code)\b[^A-Z0-9-]*([A-Z0-9]{4}(?:-[A-Z0-9]{4})+)`)
-	invalidTunnelName = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
+	deviceCodePattern     = regexp.MustCompile(`(?i)\b(?:enter\s+(?:the\s+)?)?(?:device\s*code|code)\b[^A-Z0-9-]*([A-Z0-9]{4}(?:-[A-Z0-9]{4})+)`)
+	invalidTunnelName     = regexp.MustCompile(`[^a-zA-Z0-9_.-]`)
 	authPromptLinePattern = regexp.MustCompile(`^To grant access to the server, please log into https://github\.com/login/device and use code [A-Za-z0-9-]+$`)
 )
 
@@ -199,8 +200,11 @@ func buildVSCodeInstallCommand() string {
 		fmt.Sprintf("exec >> %s 2>&1", tunnelBootstrapLogPath),
 		"echo \"[bootstrap] install started $(date -Iseconds)\"",
 		"if command -v code >/dev/null 2>&1; then",
-		"  echo \"[bootstrap] code already installed: $(command -v code)\"",
-		"  exit 0",
+		"  if code tunnel --help >/dev/null 2>&1; then",
+		"    echo \"[bootstrap] code already installed and usable: $(command -v code)\"",
+		"    exit 0",
+		"  fi",
+		"  echo \"[bootstrap] code exists but tunnel command is unavailable, reinstalling CLI\"",
 		"fi",
 		"echo \"[bootstrap] installing prerequisites via apt-get\"",
 		"apt-get update >/dev/null",
@@ -320,20 +324,24 @@ func (s *podmanService) monitorTunnelState(containerID string, hostVSCodeDir str
 
 func evaluateTunnelState(logOutput string, tokenPresent bool, logErr error, tunnelRunning bool) (podmanTunnelState, bool) {
 	if isLatestTunnelLogLineAuthPrompt(logOutput) {
+		code := extractDeviceCode(latestNonEmptyLine(logOutput))
 		return podmanTunnelState{
 			Status:  tunnelStatusBlocked,
+			Code:    code,
 			Message: tunnelAuthRequiredMessage,
 		}, true
+	}
+
+	// Runtime process check is the strongest readiness signal once the latest
+	// line is no longer an auth prompt.
+	if tunnelRunning {
+		return podmanTunnelState{Status: tunnelStatusReady}, true
 	}
 
 	if state, ok := deriveTunnelStateFromLog(logOutput); ok {
 		if state.Status == tunnelStatusBlocked || state.Status == tunnelStatusFailed {
 			return state, true
 		}
-	}
-
-	if tunnelRunning {
-		return podmanTunnelState{Status: tunnelStatusReady}, true
 	}
 
 	if tokenPresent && containsTunnelReady(logOutput) {
@@ -371,22 +379,8 @@ func latestNonEmptyLine(value string) string {
 }
 
 func deriveTunnelStateFromLog(logOutput string) (podmanTunnelState, bool) {
-	var (
-		lastState podmanTunnelState
-		found     bool
-	)
-	for _, line := range strings.Split(logOutput, "\n") {
-		state, ok := deriveTunnelStateFromLine(line)
-		if !ok {
-			continue
-		}
-		lastState = state
-		found = true
-	}
-	if found {
-		return lastState, true
-	}
-	return podmanTunnelState{}, false
+	line := latestNonEmptyLine(logOutput)
+	return deriveTunnelStateFromLine(line)
 }
 
 func deriveTunnelStateFromLine(line string) (podmanTunnelState, bool) {
@@ -401,12 +395,6 @@ func deriveTunnelStateFromLine(line string) (podmanTunnelState, bool) {
 			Code:    code,
 			Message: tunnelAuthRequiredMessage,
 		}, true
-	}
-
-	lower := strings.ToLower(trimmed)
-	if strings.Contains(lower, "open this link in your browser") &&
-		strings.Contains(lower, "vscode.dev/tunnel/") {
-		return podmanTunnelState{Status: tunnelStatusReady}, true
 	}
 
 	if containsTunnelAuthRequired(trimmed) {
@@ -446,9 +434,15 @@ func isTunnelProcessRunning(containerID string) (bool, error) {
 		containerID,
 		"sh",
 		"-lc",
-		"if command -v pgrep >/dev/null 2>&1; then "+
-			"if pgrep -fa 'code tunnel' >/dev/null 2>&1; then echo running; else echo stopped; fi; "+
-			"else if ps -ef 2>/dev/null | grep '[c]ode tunnel' >/dev/null 2>&1; then echo running; else echo stopped; fi; fi",
+		"if command -v pgrep >/dev/null 2>&1 && pgrep -fa 'code.*tunnel|code tunnel' >/dev/null 2>&1; then "+
+			"echo running; "+
+			"elif command -v ps >/dev/null 2>&1 && ps -eo args 2>/dev/null | grep -E '[c]ode( |$).*tunnel|[c]ode tunnel' >/dev/null 2>&1; then "+
+			"echo running; "+
+			"elif grep -saE 'code(.{0,32})tunnel' /proc/[0-9]*/cmdline >/dev/null 2>&1; then "+
+			"echo running; "+
+			"else "+
+			"echo stopped; "+
+			"fi",
 	)
 	if err != nil {
 		return false, err
@@ -490,8 +484,7 @@ func containsTunnelAuthRequired(logOutput string) bool {
 
 func containsTunnelReady(logOutput string) bool {
 	lower := strings.ToLower(logOutput)
-	return strings.Contains(lower, "connected to tunnel") ||
-		strings.Contains(lower, "open this link")
+	return strings.Contains(lower, "connected to tunnel")
 }
 
 func containsTunnelFailure(logOutput string) bool {
@@ -632,11 +625,11 @@ func enrichContainersWithTunnelState(containers []podmanContainer, tunnelStateBy
 		containers[i].TunnelStatus = state.Status
 		containers[i].TunnelCode = state.Code
 		containers[i].TunnelMessage = state.Message
-		containers[i].TunnelURL = buildTunnelConnectURLForContainer(containers[i].Name, state.Status)
+		containers[i].TunnelURL = buildTunnelConnectURLForContainer(containers[i].Name, containers[i].Labels, state.Status)
 	}
 }
 
-func buildTunnelConnectURLForContainer(containerName string, tunnelStatus string) string {
+func buildTunnelConnectURLForContainer(containerName string, labels map[string]string, tunnelStatus string) string {
 	status := strings.TrimSpace(strings.ToLower(tunnelStatus))
 	if status != tunnelStatusReady {
 		return ""
@@ -645,7 +638,41 @@ func buildTunnelConnectURLForContainer(containerName string, tunnelStatus string
 	if name == "" {
 		return ""
 	}
-	return "https://vscode.dev/tunnel/" + name
+	baseURL := "https://vscode.dev/tunnel/" + name
+	workspacePath := buildWorkspaceOpenPath(labels)
+	if workspacePath == "" {
+		return baseURL
+	}
+	return baseURL + workspacePath
+}
+
+func buildWorkspaceOpenPath(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	workspaceHome := strings.TrimSpace(labels[labelWorkspaceHome])
+	workspaceDir := strings.TrimSpace(labels[labelWorkspaceDir])
+	if workspaceHome == "" || workspaceDir == "" {
+		return ""
+	}
+
+	fullPath := strings.TrimRight(workspaceHome, "/") + "/workspaces/" + workspaceDir
+	fullPath = strings.TrimSpace(fullPath)
+	if fullPath == "" {
+		return ""
+	}
+	parts := strings.Split(fullPath, "/")
+	escapedParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		escapedParts = append(escapedParts, neturl.PathEscape(part))
+	}
+	if len(escapedParts) == 0 {
+		return ""
+	}
+	return "/" + strings.Join(escapedParts, "/")
 }
 
 func pruneTunnelStateMap(tunnelStateByContainerID map[string]podmanTunnelState, containers []podmanContainer) {

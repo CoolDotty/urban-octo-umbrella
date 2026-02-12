@@ -18,9 +18,14 @@ import (
 )
 
 const (
-	defaultWorkspaceImage   = "docker.io/library/ubuntu:latest"
+	defaultWorkspaceImage   = "mcr.microsoft.com/devcontainers/universal"
 	defaultWorkspaceCommand = "while true; do sleep 3600; done"
+	defaultWorkspaceHome    = "/root"
 	defaultVSCodeMountPath  = "/root/.vscode"
+	labelWorkspaceRepo      = "pocketpod.repo"
+	labelWorkspaceRef       = "pocketpod.ref"
+	labelWorkspaceDir       = "pocketpod.workspace_dir"
+	labelWorkspaceHome      = "pocketpod.workspace_home"
 
 	workspaceCreateFailedMessage = "Failed to create workspace container."
 	workspaceStartFailedMessage  = "Failed to start workspace container."
@@ -35,11 +40,23 @@ const (
 
 var (
 	errWorkspaceNameConflict = errors.New("workspace name already exists")
+	errWorkspaceDirConflict  = errors.New("workspace directory already exists")
+	errWorkspaceGitMissing   = errors.New("git unavailable")
+	errWorkspaceCloneFailed  = errors.New("workspace clone failed")
+	errWorkspaceRefFailed    = errors.New("workspace ref checkout failed")
 
 	workspaceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 	envKeyPattern        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	scpLikeGitPattern    = regexp.MustCompile(`^git@[A-Za-z0-9._-]+:[^\s]+$`)
+	invalidDirNameChars  = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 )
+
+var runWorkspaceCommand = func(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.CombinedOutput()
+}
+
+var workspaceLookPath = exec.LookPath
 
 type createWorkspacePayload struct {
 	RepoURL string            `json:"repoUrl"`
@@ -96,9 +113,21 @@ func registerWorkspaceRoutes(rtr *router.Router[*core.RequestEvent], svc *podman
 				return re.JSON(http.StatusConflict, map[string]string{
 					"message": "Workspace name already exists.",
 				})
+			case errors.Is(err, errWorkspaceDirConflict):
+				return re.JSON(http.StatusConflict, map[string]string{
+					"message": "Workspace directory already exists.",
+				})
 			case errors.Is(err, errWorkspaceStartFailed):
 				return re.JSON(http.StatusInternalServerError, map[string]string{
 					"message": workspaceStartFailedMessage,
+				})
+			case errors.Is(err, errWorkspaceGitMissing):
+				return re.JSON(http.StatusInternalServerError, map[string]string{
+					"message": "Git is unavailable on the server.",
+				})
+			case errors.Is(err, errWorkspaceCloneFailed), errors.Is(err, errWorkspaceRefFailed):
+				return re.JSON(http.StatusInternalServerError, map[string]string{
+					"message": "Failed to clone workspace repository.",
 				})
 			default:
 				return re.JSON(http.StatusInternalServerError, map[string]string{
@@ -118,20 +147,28 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		return nil, errPodmanUnavailable
 	}
 
+	workspaceHostPath, workspaceDirName, err := cloneWorkspaceRepository(userID, payload)
+	if err != nil {
+		return nil, err
+	}
+
 	volumeHostPath, err := ensureWorkspaceVSCodeVolumePath(userID)
 	if err != nil {
 		return nil, err
 	}
-	vscodeMountTarget := defaultVSCodeMountPath
-	if resolvedPath, resolveErr := resolveWorkspaceVSCodeMountTarget(defaultWorkspaceImage); resolveErr == nil && strings.TrimSpace(resolvedPath) != "" {
-		vscodeMountTarget = resolvedPath
+	workspaceHomeTarget := defaultWorkspaceHome
+	if resolvedPath, resolveErr := resolveWorkspaceHomeTarget(defaultWorkspaceImage); resolveErr == nil && strings.TrimSpace(resolvedPath) != "" {
+		workspaceHomeTarget = resolvedPath
 	}
+	workspaceMountArg := formatWorkspaceMountArg(workspaceHostPath, strings.TrimRight(workspaceHomeTarget, "/")+"/workspaces")
+	vscodeMountTarget := strings.TrimRight(workspaceHomeTarget, "/") + "/.vscode"
 	vscodeMountArg := formatWorkspaceVSCodeMountArg(volumeHostPath, vscodeMountTarget)
 
 	args := []string{"create", "--pull=missing"}
 	if payload.Name != "" {
 		args = append(args, "--name", payload.Name)
 	}
+	args = append(args, "--mount", workspaceMountArg)
 	args = append(args, "--mount", vscodeMountArg)
 
 	keys := make([]string, 0, len(payload.Env))
@@ -143,15 +180,16 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		args = append(args, "-e", fmt.Sprintf("%s=%s", key, payload.Env[key]))
 	}
 
-	args = append(args, "--label", fmt.Sprintf("pocketpod.repo=%s", payload.RepoURL))
+	args = append(args, "--label", fmt.Sprintf("%s=%s", labelWorkspaceRepo, payload.RepoURL))
+	args = append(args, "--label", fmt.Sprintf("%s=%s", labelWorkspaceDir, workspaceDirName))
+	args = append(args, "--label", fmt.Sprintf("%s=%s", labelWorkspaceHome, workspaceHomeTarget))
 	if payload.Ref != "" {
-		args = append(args, "--label", fmt.Sprintf("pocketpod.ref=%s", payload.Ref))
+		args = append(args, "--label", fmt.Sprintf("%s=%s", labelWorkspaceRef, payload.Ref))
 	}
 
 	args = append(args, defaultWorkspaceImage, "sh", "-lc", defaultWorkspaceCommand)
 
-	createCmd := exec.Command("podman", args...)
-	createOutput, createErr := createCmd.CombinedOutput()
+	createOutput, createErr := runWorkspaceCommand("podman", args...)
 	if createErr != nil {
 		if isPodmanNameConflict(createOutput) {
 			return nil, errWorkspaceNameConflict
@@ -164,8 +202,7 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		return nil, errors.New("empty container id")
 	}
 
-	startCmd := exec.Command("podman", "start", containerID)
-	if _, err := startCmd.CombinedOutput(); err != nil {
+	if _, err := runWorkspaceCommand("podman", "start", containerID); err != nil {
 		return nil, fmt.Errorf("%w: %v", errWorkspaceStartFailed, err)
 	}
 
@@ -218,33 +255,162 @@ func ensureWorkspaceVSCodeVolumePath(userID string) (string, error) {
 	return absolutePath, nil
 }
 
-func formatWorkspaceVSCodeMountArg(volumeHostPath string, mountTarget string) string {
+func ensureWorkspaceRepoBasePath(userID string) (string, error) {
+	trimmedUserID := strings.TrimSpace(userID)
+	if trimmedUserID == "" {
+		return "", errors.New("missing user id")
+	}
+
+	workspaceHostPath := filepath.Join(".", "volumes", trimmedUserID, "workspaces")
+	if err := os.MkdirAll(workspaceHostPath, 0o755); err != nil {
+		return "", err
+	}
+	absolutePath, err := filepath.Abs(workspaceHostPath)
+	if err != nil {
+		return "", err
+	}
+	return absolutePath, nil
+}
+
+func cloneWorkspaceRepository(userID string, payload createWorkspacePayload) (string, string, error) {
+	if _, err := workspaceLookPath("git"); err != nil {
+		return "", "", errWorkspaceGitMissing
+	}
+
+	repoBasePath, err := ensureWorkspaceRepoBasePath(userID)
+	if err != nil {
+		return "", "", err
+	}
+	dirName, err := deriveWorkspaceDirName(payload)
+	if err != nil {
+		return "", "", err
+	}
+	repoPath := filepath.Join(repoBasePath, dirName)
+	available, err := isWorkspaceRepoPathAvailable(repoPath)
+	if err != nil {
+		return "", "", err
+	}
+	if !available {
+		return "", "", errWorkspaceDirConflict
+	}
+
+	if cloneOutput, cloneErr := runWorkspaceCommand("git", "clone", "--", payload.RepoURL, repoPath); cloneErr != nil {
+		return "", "", fmt.Errorf("%w: %s", errWorkspaceCloneFailed, strings.TrimSpace(string(cloneOutput)))
+	}
+	if payload.Ref != "" {
+		if checkoutOutput, checkoutErr := runWorkspaceCommand("git", "-C", repoPath, "checkout", "--detach", payload.Ref); checkoutErr != nil {
+			return "", "", fmt.Errorf("%w: %s", errWorkspaceRefFailed, strings.TrimSpace(string(checkoutOutput)))
+		}
+	}
+
+	return repoBasePath, dirName, nil
+}
+
+func deriveWorkspaceDirName(payload createWorkspacePayload) (string, error) {
+	if payload.Name != "" {
+		return payload.Name, nil
+	}
+
+	repoPath := extractRepoPath(payload.RepoURL)
+	repoPath = strings.Trim(repoPath, "/")
+	if repoPath == "" {
+		return "", errors.New("unable to derive workspace directory")
+	}
+
+	base := strings.TrimSpace(pathBase(repoPath))
+	base = strings.TrimSuffix(base, ".git")
+	base = invalidDirNameChars.ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-._")
+	if base == "" {
+		return "", errors.New("unable to derive workspace directory")
+	}
+	if len(base) > maxWorkspaceNameLength {
+		base = strings.TrimRight(base[:maxWorkspaceNameLength], "-._")
+	}
+	if base == "" || !workspaceNamePattern.MatchString(base) {
+		return "", errors.New("unable to derive workspace directory")
+	}
+	return base, nil
+}
+
+func extractRepoPath(repoURL string) string {
+	if scpLikeGitPattern.MatchString(repoURL) {
+		if idx := strings.Index(repoURL, ":"); idx >= 0 && idx+1 < len(repoURL) {
+			return repoURL[idx+1:]
+		}
+		return ""
+	}
+
+	parsed, err := url.Parse(repoURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Path
+}
+
+func pathBase(pathValue string) string {
+	cleaned := strings.TrimSuffix(pathValue, "/")
+	if cleaned == "" {
+		return ""
+	}
+	parts := strings.Split(cleaned, "/")
+	return parts[len(parts)-1]
+}
+
+func isWorkspaceRepoPathAvailable(repoPath string) (bool, error) {
+	info, err := os.Stat(repoPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+
+	entries, readErr := os.ReadDir(repoPath)
+	if readErr != nil {
+		return false, readErr
+	}
+	return len(entries) == 0, nil
+}
+
+func formatWorkspaceMountArg(volumeHostPath string, mountTarget string) string {
 	normalizedHostPath := filepath.ToSlash(strings.TrimSpace(volumeHostPath))
 	target := strings.TrimSpace(mountTarget)
 	if target == "" {
-		target = defaultVSCodeMountPath
+		target = strings.TrimRight(defaultWorkspaceHome, "/") + "/workspaces"
 	}
 	return fmt.Sprintf("type=bind,src=%s,dst=%s", normalizedHostPath, target)
 }
 
-func resolveWorkspaceVSCodeMountTarget(imageRef string) (string, error) {
+func formatWorkspaceVSCodeMountArg(volumeHostPath string, mountTarget string) string {
+	target := strings.TrimSpace(mountTarget)
+	if target == "" {
+		target = defaultVSCodeMountPath
+	}
+	return formatWorkspaceMountArg(volumeHostPath, target)
+}
+
+func resolveWorkspaceHomeTarget(imageRef string) (string, error) {
 	output, err := runPodmanCommand("run", "--rm", "--entrypoint", "sh", imageRef, "-lc", "cat /etc/passwd 2>/dev/null || true")
 	if err != nil {
 		return "", err
 	}
-	return deriveWorkspaceVSCodeMountTargetFromPasswd(string(output)), nil
+	return deriveWorkspaceHomeFromPasswd(string(output)), nil
 }
 
-func deriveWorkspaceVSCodeMountTargetFromPasswd(passwdContents string) string {
+func deriveWorkspaceHomeFromPasswd(passwdContents string) string {
 	_, home, ok := selectFirstNonRootUser(passwdContents)
 	if !ok {
-		return defaultVSCodeMountPath
+		return defaultWorkspaceHome
 	}
 	trimmedHome := strings.TrimSpace(home)
 	if trimmedHome == "" {
-		return defaultVSCodeMountPath
+		return defaultWorkspaceHome
 	}
-	return strings.TrimRight(trimmedHome, "/") + "/.vscode"
+	return strings.TrimRight(trimmedHome, "/")
 }
 
 func validateCreateWorkspacePayload(payload *createWorkspacePayload) error {

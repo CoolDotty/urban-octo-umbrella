@@ -64,7 +64,7 @@ func TestEvaluateTunnelStateStartingWhenNoSignal(t *testing.T) {
 	}
 }
 
-func TestEvaluateTunnelStateReadyWhenReadyLineAppearsAfterAuthPrompt(t *testing.T) {
+func TestEvaluateTunnelStateReadyWhenOpenLinkAppearsAfterAuthPrompt(t *testing.T) {
 	logOutput := strings.Join([]string{
 		"To grant access to the server, please log into https://github.com/login/device and use code ABCD-EFGH",
 		"Open this link in your browser https://vscode.dev/tunnel/cool_ishizaka",
@@ -78,7 +78,7 @@ func TestEvaluateTunnelStateReadyWhenReadyLineAppearsAfterAuthPrompt(t *testing.
 		t.Fatalf("expected ready status, got %q", state.Status)
 	}
 	if state.Code != "" {
-		t.Fatalf("expected no auth code in ready state, got %q", state.Code)
+		t.Fatalf("expected no code in ready status, got %q", state.Code)
 	}
 }
 
@@ -90,6 +90,24 @@ func TestEvaluateTunnelStateReadyLineWithoutProcessRemainsStarting(t *testing.T)
 	}
 	if state.Status != tunnelStatusStarting {
 		t.Fatalf("expected starting status, got %q", state.Status)
+	}
+}
+
+func TestEvaluateTunnelStateOpenLinkAfterAuthWithoutRunningRemainsStarting(t *testing.T) {
+	logOutput := strings.Join([]string{
+		"To grant access to the server, please log into https://github.com/login/device and use code ABCD-EFGH",
+		"Open this link in your browser https://vscode.dev/tunnel/cool_ishizaka",
+	}, "\n")
+
+	state, terminal := evaluateTunnelState(logOutput, false, nil, false)
+	if terminal {
+		t.Fatal("expected non-terminal state")
+	}
+	if state.Status != tunnelStatusStarting {
+		t.Fatalf("expected starting status, got %q", state.Status)
+	}
+	if state.Code != "" {
+		t.Fatalf("expected no code in starting state, got %q", state.Code)
 	}
 }
 
@@ -105,6 +123,9 @@ func TestEvaluateTunnelStateBlockedWhenLatestLineIsAuthPrompt(t *testing.T) {
 	}
 	if state.Status != tunnelStatusBlocked {
 		t.Fatalf("expected blocked status, got %q", state.Status)
+	}
+	if state.Code != "ABCD-EFGH" {
+		t.Fatalf("expected extracted code, got %q", state.Code)
 	}
 }
 
@@ -131,6 +152,26 @@ func TestEnrichContainersWithTunnelState(t *testing.T) {
 }
 
 func TestEnrichContainersWithTunnelStateAddsConnectURLWhenNotBlocked(t *testing.T) {
+	containers := []podmanContainer{{
+		ID:   "abc",
+		Name: "my-workspace",
+		Labels: map[string]string{
+			labelWorkspaceHome: "/home/ubuntu",
+			labelWorkspaceDir:  "tiny-stats",
+		},
+	}}
+	states := map[string]podmanTunnelState{
+		"abc": {Status: tunnelStatusReady},
+	}
+
+	enrichContainersWithTunnelState(containers, states)
+
+	if containers[0].TunnelURL != "https://vscode.dev/tunnel/my-workspace/home/ubuntu/workspaces/tiny-stats" {
+		t.Fatalf("expected tunnel URL, got %q", containers[0].TunnelURL)
+	}
+}
+
+func TestEnrichContainersWithTunnelStateUsesBaseURLWhenWorkspaceLabelsMissing(t *testing.T) {
 	containers := []podmanContainer{{ID: "abc", Name: "my-workspace"}}
 	states := map[string]podmanTunnelState{
 		"abc": {Status: tunnelStatusReady},
@@ -139,7 +180,7 @@ func TestEnrichContainersWithTunnelStateAddsConnectURLWhenNotBlocked(t *testing.
 	enrichContainersWithTunnelState(containers, states)
 
 	if containers[0].TunnelURL != "https://vscode.dev/tunnel/my-workspace" {
-		t.Fatalf("expected tunnel URL, got %q", containers[0].TunnelURL)
+		t.Fatalf("expected base tunnel URL, got %q", containers[0].TunnelURL)
 	}
 }
 
@@ -166,6 +207,13 @@ func TestBuildTunnelStartCommand(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "HOME='/home/dev'") {
 		t.Fatalf("expected HOME assignment in command: %s", cmd)
+	}
+}
+
+func TestBuildVSCodeInstallCommandValidatesCodeTunnel(t *testing.T) {
+	cmd := buildVSCodeInstallCommand()
+	if !strings.Contains(cmd, "code tunnel --help") {
+		t.Fatalf("expected tunnel validation check in install command: %s", cmd)
 	}
 }
 
