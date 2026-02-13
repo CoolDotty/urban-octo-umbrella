@@ -54,6 +54,7 @@ func (s *podmanService) deleteContainer(containerID string) error {
 		return fmt.Errorf("delete container: %w", err)
 	}
 
+	s.stopTunnelMonitor(containerID)
 	s.clearTunnelState(containerID)
 	s.schedulePoll(podmanPollDebounce)
 	return nil

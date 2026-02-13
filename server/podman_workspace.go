@@ -187,6 +187,9 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		args = append(args, "--label", fmt.Sprintf("%s=%s", labelWorkspaceRef, payload.Ref))
 	}
 
+	sessionID := generateSessionID()
+	args = append(args, "--label", fmt.Sprintf("%s=%s", labelTunnelSession, sessionID))
+
 	args = append(args, defaultWorkspaceImage, "sh", "-lc", defaultWorkspaceCommand)
 
 	createOutput, createErr := runWorkspaceCommand("podman", args...)
@@ -218,7 +221,7 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		status = "Running"
 	}
 
-	tunnelState := s.bootstrapTunnel(containerID, name)
+	tunnelState := s.bootstrapTunnel(containerID, name, sessionID)
 	if tunnelState.Status == "" {
 		tunnelState.Status = tunnelStatusStarting
 	}
@@ -226,7 +229,7 @@ func (s *podmanService) createWorkspace(userID string, payload createWorkspacePa
 		s.schedulePoll(podmanPollDebounce)
 	}
 	if tunnelState.Status == tunnelStatusStarting {
-		go s.monitorTunnelState(containerID, volumeHostPath)
+		s.startTunnelMonitor(containerID, sessionID, volumeHostPath)
 	}
 
 	return &createWorkspaceResponse{

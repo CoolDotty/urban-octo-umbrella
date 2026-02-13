@@ -82,6 +82,7 @@ type podmanService struct {
 	mu                       sync.RWMutex
 	containers               []podmanContainer
 	tunnelStateByContainerID map[string]podmanTunnelState
+	monitors                 map[string]*tunnelMonitor
 	hash                     uint64
 	errMessage               string
 	initialized              bool
@@ -104,6 +105,7 @@ func newPodmanService() *podmanService {
 	return &podmanService{
 		containers:               []podmanContainer{},
 		tunnelStateByContainerID: make(map[string]podmanTunnelState),
+		monitors:                 make(map[string]*tunnelMonitor),
 		clients:                  make(map[*podmanClient]struct{}),
 		pollCh:                   make(chan time.Duration, 1),
 	}
@@ -116,6 +118,8 @@ func (s *podmanService) start(app core.App) {
 			cancel()
 			return e.Next()
 		})
+
+		s.reconcileTunnelSessions()
 
 		go s.runPoller(ctx)
 		go s.runEventListener(ctx)

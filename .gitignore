@@ -49,3 +49,8 @@ pocketbase
 pocketbase.exe
 *.pb
 volumes/
+
+############################
+# Junk
+############################
+telemetry-id

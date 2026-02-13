@@ -10,7 +10,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -21,11 +24,12 @@ const (
 
 	tunnelAuthRequiredMessage = "Authentication required"
 	tunnelAuthURL             = "https://github.com/login/device"
-	tunnelLogPath             = "/tmp/pocketpod-vscode-tunnel.log"
 	tunnelBootstrapLogPath    = "/tmp/pocketpod-vscode-bootstrap.log"
 
-	tunnelMonitorMaxAttempts = 20
-	tunnelMonitorInterval    = 3 * time.Second
+	tunnelProgressTimeout = 120 * time.Second
+	tunnelPollInterval    = 3 * time.Second
+
+	labelTunnelSession = "pocketpod.tunnel_session"
 )
 
 var (
@@ -57,7 +61,36 @@ type workspaceTunnelDebug struct {
 	StartOutput   string `json:"startOutput,omitempty"`
 }
 
-func (s *podmanService) bootstrapTunnel(containerID string, workspaceName string) podmanTunnelState {
+type tunnelMonitor struct {
+	containerID   string
+	sessionID     string
+	state         string
+	lastProgress  time.Time
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	hostVSCodeDir string
+}
+
+type tunnelHealth struct {
+	processAlive bool
+	tokenPresent bool
+	authRequired bool
+	deviceCode   string
+}
+
+func generateSessionID() string {
+	return fmt.Sprintf("%d-%s", time.Now().Unix(), strings.Split(uuid.New().String(), "-")[0])
+}
+
+func tunnelPIDFile(sessionID string) string {
+	return fmt.Sprintf("/tmp/pocketpod-tunnel-%s.pid", sessionID)
+}
+
+func tunnelLogFile(sessionID string) string {
+	return fmt.Sprintf("/tmp/pocketpod-tunnel-%s.log", sessionID)
+}
+
+func (s *podmanService) bootstrapTunnel(containerID string, workspaceName string, sessionID string) podmanTunnelState {
 	execUser, err := resolveFirstNonRootUser(containerID)
 	if err != nil {
 		return podmanTunnelState{
@@ -67,9 +100,9 @@ func (s *podmanService) bootstrapTunnel(containerID string, workspaceName string
 	}
 
 	installCommand := buildVSCodeInstallCommand()
-	startCommand := buildTunnelStartCommand(buildTunnelName(workspaceName, containerID), execUser.Home)
+	startCommand := buildTunnelStartCommand(sessionID, buildTunnelName(workspaceName, containerID), execUser.Home, execUser.Name)
 	debug := &workspaceTunnelDebug{
-		Version:    "tunnel-debug-v1",
+		Version:    "tunnel-debug-v2-session",
 		ExecUser:   execUser.Name,
 		InstallCmd: installCommand,
 		StartCmd:   startCommand,
@@ -83,7 +116,7 @@ func (s *podmanService) bootstrapTunnel(containerID string, workspaceName string
 		}
 	}
 
-	_, _ = runPodmanCommand("exec", containerID, "sh", "-lc", buildTunnelLogPrepareCommand(execUser.Name))
+	_, _ = runPodmanCommand("exec", containerID, "sh", "-lc", buildTunnelLogPrepareCommand(execUser.Name, sessionID))
 
 	installOutput, installErr := runPodmanCommand(
 		"exec",
@@ -117,17 +150,21 @@ func (s *podmanService) bootstrapTunnel(containerID string, workspaceName string
 	}
 }
 
-func buildTunnelLogPrepareCommand(execUser string) string {
+func buildTunnelLogPrepareCommand(execUser string, sessionID string) string {
 	trimmedUser := strings.TrimSpace(execUser)
+	logPath := tunnelLogFile(sessionID)
+	pidPath := tunnelPIDFile(sessionID)
 	if trimmedUser == "" {
-		return "mkdir -p /tmp && : > " + tunnelLogPath + " && : > " + tunnelBootstrapLogPath
+		return fmt.Sprintf("mkdir -p /tmp && : > %s && : > %s && : > %s", logPath, pidPath, tunnelBootstrapLogPath)
 	}
 	return fmt.Sprintf(
-		"mkdir -p /tmp && : > %s && : > %s && chown %s %s",
-		tunnelLogPath,
+		"mkdir -p /tmp && : > %s && : > %s && : > %s && chown %s %s %s",
+		logPath,
+		pidPath,
 		tunnelBootstrapLogPath,
 		shellSingleQuote(trimmedUser),
-		tunnelLogPath,
+		logPath,
+		pidPath,
 	)
 }
 
@@ -226,7 +263,7 @@ func buildVSCodeInstallCommand() string {
 	}, "\n")
 }
 
-func buildTunnelStartCommand(tunnelName string, homeDir string) string {
+func buildTunnelStartCommand(sessionID string, tunnelName string, homeDir string, execUser string) string {
 	safeName := shellSingleQuote(tunnelName)
 	home := strings.TrimSpace(homeDir)
 	if home == "" {
@@ -235,13 +272,18 @@ func buildTunnelStartCommand(tunnelName string, homeDir string) string {
 	dataDir := strings.TrimRight(home, "/") + "/.vscode"
 	safeHome := shellSingleQuote(home)
 	safeDataDir := shellSingleQuote(dataDir)
+	logPath := tunnelLogFile(sessionID)
+	pidPath := tunnelPIDFile(sessionID)
+
 	return strings.Join([]string{
-		fmt.Sprintf("echo \"[tunnel] start requested $(date -Iseconds), name=%s\" >> %s", safeName, tunnelLogPath),
-		fmt.Sprintf("echo \"[tunnel] starting as user: $(id -un)\" >> %s", tunnelLogPath),
-		fmt.Sprintf("echo \"[tunnel] code path: $(command -v code || echo missing)\" >> %s", tunnelLogPath),
+		fmt.Sprintf("echo \"[tunnel] start requested $(date -Iseconds), name=%s, session=%s\" >> %s", safeName, sessionID, logPath),
+		fmt.Sprintf("echo \"[tunnel] starting as user: $(id -un)\" >> %s", logPath),
+		fmt.Sprintf("echo \"[tunnel] code path: $(command -v code || echo missing)\" >> %s", logPath),
 		fmt.Sprintf("mkdir -p %s", safeDataDir),
-		fmt.Sprintf("HOME=%s VSCODE_CLI_DATA_DIR=%s code tunnel --accept-server-license-terms --name %s >> %s 2>&1", safeHome, safeDataDir, safeName, tunnelLogPath),
-		fmt.Sprintf("rc=$?; echo \"[tunnel] process exited with code $rc at $(date -Iseconds)\" >> %s; exit $rc", tunnelLogPath),
+		fmt.Sprintf("HOME=%s VSCODE_CLI_DATA_DIR=%s code tunnel --accept-server-license-terms --name %s >> %s 2>&1 &", safeHome, safeDataDir, safeName, logPath),
+		fmt.Sprintf("echo $! > %s", pidPath),
+		"wait",
+		fmt.Sprintf("rc=$?; echo \"[tunnel] process exited with code $rc at $(date -Iseconds)\" >> %s; exit $rc", logPath),
 	}, "; ")
 }
 
@@ -299,72 +341,194 @@ func firstNonEmptyLine(value string) string {
 	return ""
 }
 
-func (s *podmanService) monitorTunnelState(containerID string, hostVSCodeDir string) {
-	for attempt := 0; attempt < tunnelMonitorMaxAttempts; attempt++ {
-		tokenPresent := hasVSCodeToken(hostVSCodeDir)
-		logOutput, logErr := readTunnelLog(containerID)
-		tunnelRunning, _ := isTunnelProcessRunning(containerID)
-		state, terminal := evaluateTunnelState(logOutput, tokenPresent, logErr, tunnelRunning)
+func (s *podmanService) startTunnelMonitor(containerID string, sessionID string, hostVSCodeDir string) {
+	m := &tunnelMonitor{
+		containerID:   containerID,
+		sessionID:     sessionID,
+		state:         tunnelStatusStarting,
+		lastProgress:  time.Now(),
+		stopCh:        make(chan struct{}),
+		hostVSCodeDir: hostVSCodeDir,
+	}
 
-		if state.Status != "" && s.setTunnelState(containerID, state) {
-			s.schedulePoll(podmanPollDebounce)
-		}
+	s.mu.Lock()
+	s.monitors[containerID] = m
+	s.mu.Unlock()
 
-		if terminal {
+	go m.run(s)
+}
+
+func (m *tunnelMonitor) run(s *podmanService) {
+	ticker := time.NewTicker(tunnelPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopCh:
 			return
+		case <-ticker.C:
+			health := s.checkTunnelHealth(m.containerID, m.sessionID, m.hostVSCodeDir)
+			newState := m.evaluateHealth(health)
+
+			if newState != m.state {
+				m.lastProgress = time.Now()
+				m.state = newState
+				s.setTunnelState(m.containerID, buildTunnelStateFromHealth(newState, health))
+				s.schedulePoll(podmanPollDebounce)
+			}
+
+			if newState == tunnelStatusFailed {
+				return
+			}
+
+			if time.Since(m.lastProgress) > tunnelProgressTimeout {
+				s.setTunnelState(m.containerID, podmanTunnelState{
+					Status:  tunnelStatusFailed,
+					Message: "Tunnel bootstrap timed out.",
+				})
+				s.schedulePoll(podmanPollDebounce)
+				return
+			}
 		}
-
-		time.Sleep(tunnelMonitorInterval)
-	}
-
-	if s.setTunnelState(containerID, podmanTunnelState{Status: tunnelStatusFailed, Message: "Tunnel bootstrap timed out."}) {
-		s.schedulePoll(podmanPollDebounce)
 	}
 }
 
-func evaluateTunnelState(logOutput string, tokenPresent bool, logErr error, tunnelRunning bool) (podmanTunnelState, bool) {
-	if isLatestTunnelLogLineAuthPrompt(logOutput) {
-		code := extractDeviceCode(latestNonEmptyLine(logOutput))
-		return podmanTunnelState{
-			Status:  tunnelStatusBlocked,
-			Code:    code,
-			Message: tunnelAuthRequiredMessage,
-		}, true
+func (m *tunnelMonitor) evaluateHealth(health tunnelHealth) string {
+	if !health.processAlive {
+		return tunnelStatusFailed
 	}
 
-	// Runtime process check is the strongest readiness signal once the latest
-	// line is no longer an auth prompt.
-	if tunnelRunning {
-		return podmanTunnelState{Status: tunnelStatusReady}, true
+	if health.tokenPresent {
+		return tunnelStatusReady
 	}
 
-	if state, ok := deriveTunnelStateFromLog(logOutput); ok {
-		if state.Status == tunnelStatusBlocked || state.Status == tunnelStatusFailed {
-			return state, true
+	if health.authRequired {
+		return tunnelStatusBlocked
+	}
+
+	return tunnelStatusStarting
+}
+
+func buildTunnelStateFromHealth(state string, health tunnelHealth) podmanTunnelState {
+	result := podmanTunnelState{Status: state}
+	if health.authRequired && health.deviceCode != "" {
+		result.Code = health.deviceCode
+		result.Message = tunnelAuthRequiredMessage
+	}
+	return result
+}
+
+func (s *podmanService) checkTunnelHealth(containerID string, sessionID string, hostVSCodeDir string) tunnelHealth {
+	health := tunnelHealth{}
+
+	pidOutput, pidErr := runPodmanCommand(
+		"exec",
+		containerID,
+		"sh",
+		"-lc",
+		fmt.Sprintf("kill -0 $(cat %s 2>/dev/null) 2>/dev/null && echo alive || echo dead", tunnelPIDFile(sessionID)),
+	)
+	if pidErr == nil && strings.TrimSpace(string(pidOutput)) == "alive" {
+		health.processAlive = true
+	}
+
+	health.tokenPresent = hasVSCodeToken(hostVSCodeDir)
+
+	logOutput, logErr := s.readSessionLog(containerID, sessionID)
+	if logErr == nil {
+		line := latestNonEmptyLine(logOutput)
+		if authPromptLinePattern.MatchString(line) {
+			health.authRequired = true
+			health.deviceCode = extractDeviceCode(line)
+		} else if code := extractDeviceCode(line); code != "" {
+			health.authRequired = true
+			health.deviceCode = code
 		}
 	}
 
-	if tokenPresent && containsTunnelReady(logOutput) {
-		return podmanTunnelState{Status: tunnelStatusReady}, true
-	}
-
-	if errors.Is(logErr, errPodmanUnavailable) {
-		return podmanTunnelState{Status: tunnelStatusFailed, Message: "Podman unavailable while checking tunnel."}, true
-	}
-
-	if logErr != nil && isPodmanContainerNotFound([]byte(logErr.Error())) {
-		return podmanTunnelState{Status: tunnelStatusFailed, Message: "Container not found while checking tunnel."}, true
-	}
-
-	return podmanTunnelState{Status: tunnelStatusStarting}, false
+	return health
 }
 
-func isLatestTunnelLogLineAuthPrompt(logOutput string) bool {
-	line := latestNonEmptyLine(logOutput)
-	if line == "" {
-		return false
+func (s *podmanService) readSessionLog(containerID string, sessionID string) (string, error) {
+	logPath := tunnelLogFile(sessionID)
+	output, err := runPodmanCommand("exec", containerID, "sh", "-lc", fmt.Sprintf("cat %s 2>/dev/null || true", logPath))
+	if err != nil {
+		return "", err
 	}
-	return authPromptLinePattern.MatchString(line)
+	return string(output), nil
+}
+
+func (s *podmanService) stopTunnelMonitor(containerID string) {
+	s.mu.Lock()
+	monitor, ok := s.monitors[containerID]
+	if ok {
+		delete(s.monitors, containerID)
+	}
+	s.mu.Unlock()
+
+	if ok && monitor != nil {
+		monitor.stop()
+	}
+}
+
+func (m *tunnelMonitor) stop() {
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
+}
+
+func (s *podmanService) reconcileTunnelSessions() {
+	containers, err := listPodmanContainers()
+	if err != nil {
+		return
+	}
+
+	for _, container := range containers {
+		sessionID := container.Labels[labelTunnelSession]
+		if sessionID == "" {
+			continue
+		}
+		containerID := strings.TrimSpace(container.ID)
+		if containerID == "" {
+			continue
+		}
+
+		health := s.checkTunnelHealth(containerID, sessionID, "")
+		if health.processAlive {
+			hostVSCodeDir := deriveHostVSCodeDirFromContainer(container)
+			s.startTunnelMonitor(containerID, sessionID, hostVSCodeDir)
+			state := buildTunnelStateFromHealth("starting", health)
+			if health.authRequired {
+				state = buildTunnelStateFromHealth(tunnelStatusBlocked, health)
+			}
+			s.setTunnelState(containerID, state)
+		} else {
+			s.setTunnelState(containerID, podmanTunnelState{
+				Status:  tunnelStatusFailed,
+				Message: "Tunnel process not running.",
+			})
+		}
+	}
+}
+
+func deriveHostVSCodeDirFromContainer(container podmanContainer) string {
+	labels := container.Labels
+	if len(labels) == 0 {
+		return ""
+	}
+	workspaceHome := strings.TrimSpace(labels[labelWorkspaceHome])
+	if workspaceHome == "" {
+		return ""
+	}
+	idx := strings.Index(workspaceHome, "/")
+	if idx < 0 {
+		return ""
+	}
+	userPath := workspaceHome[:idx]
+	if userPath == "" {
+		return ""
+	}
+	return filepath.Join(".", "volumes", userPath, ".vscode")
 }
 
 func latestNonEmptyLine(value string) string {
@@ -378,122 +542,6 @@ func latestNonEmptyLine(value string) string {
 	return ""
 }
 
-func deriveTunnelStateFromLog(logOutput string) (podmanTunnelState, bool) {
-	line := latestNonEmptyLine(logOutput)
-	return deriveTunnelStateFromLine(line)
-}
-
-func deriveTunnelStateFromLine(line string) (podmanTunnelState, bool) {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return podmanTunnelState{}, false
-	}
-
-	if code := extractDeviceCode(trimmed); code != "" {
-		return podmanTunnelState{
-			Status:  tunnelStatusBlocked,
-			Code:    code,
-			Message: tunnelAuthRequiredMessage,
-		}, true
-	}
-
-	if containsTunnelAuthRequired(trimmed) {
-		return podmanTunnelState{
-			Status:  tunnelStatusBlocked,
-			Message: tunnelAuthRequiredMessage,
-		}, true
-	}
-
-	if containsTunnelFailure(trimmed) {
-		return podmanTunnelState{
-			Status:  tunnelStatusFailed,
-			Message: "Tunnel failed to start.",
-		}, true
-	}
-
-	if containsTunnelReady(trimmed) {
-		return podmanTunnelState{Status: tunnelStatusReady}, true
-	}
-
-	return podmanTunnelState{}, false
-}
-
-func discoverTunnelStateFromContainer(containerID string) (podmanTunnelState, bool) {
-	logOutput, err := readTunnelLog(containerID)
-	if err != nil {
-		return podmanTunnelState{}, false
-	}
-	tunnelRunning, _ := isTunnelProcessRunning(containerID)
-	state, terminal := evaluateTunnelState(logOutput, false, nil, tunnelRunning)
-	return state, terminal
-}
-
-func isTunnelProcessRunning(containerID string) (bool, error) {
-	output, err := runPodmanCommand(
-		"exec",
-		containerID,
-		"sh",
-		"-lc",
-		"if command -v pgrep >/dev/null 2>&1 && pgrep -fa 'code.*tunnel|code tunnel' >/dev/null 2>&1; then "+
-			"echo running; "+
-			"elif command -v ps >/dev/null 2>&1 && ps -eo args 2>/dev/null | grep -E '[c]ode( |$).*tunnel|[c]ode tunnel' >/dev/null 2>&1; then "+
-			"echo running; "+
-			"elif grep -saE 'code(.{0,32})tunnel' /proc/[0-9]*/cmdline >/dev/null 2>&1; then "+
-			"echo running; "+
-			"else "+
-			"echo stopped; "+
-			"fi",
-	)
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(string(output)) == "running", nil
-}
-
-func discoverTunnelStatesForContainers(containers []podmanContainer) map[string]podmanTunnelState {
-	discovered := make(map[string]podmanTunnelState)
-	for _, container := range containers {
-		containerID := strings.TrimSpace(container.ID)
-		if containerID == "" {
-			continue
-		}
-		state, ok := discoverTunnelStateFromContainer(containerID)
-		if !ok || strings.TrimSpace(state.Status) == "" {
-			continue
-		}
-		discovered[containerID] = state
-	}
-	return discovered
-}
-
-func mergeTunnelStateMap(dst map[string]podmanTunnelState, src map[string]podmanTunnelState) {
-	for containerID, state := range src {
-		if strings.TrimSpace(containerID) == "" || strings.TrimSpace(state.Status) == "" {
-			continue
-		}
-		dst[containerID] = state
-	}
-}
-
-func containsTunnelAuthRequired(logOutput string) bool {
-	lower := strings.ToLower(logOutput)
-	return strings.Contains(lower, "github.com/login/device") ||
-		strings.Contains(lower, "authentication") && strings.Contains(lower, "required") ||
-		strings.Contains(lower, "device code")
-}
-
-func containsTunnelReady(logOutput string) bool {
-	lower := strings.ToLower(logOutput)
-	return strings.Contains(lower, "connected to tunnel")
-}
-
-func containsTunnelFailure(logOutput string) bool {
-	lower := strings.ToLower(logOutput)
-	return strings.Contains(lower, "command not found") ||
-		strings.Contains(lower, "failed to") ||
-		strings.Contains(lower, "error creating tunnel")
-}
-
 func extractDeviceCode(logOutput string) string {
 	matches := deviceCodePattern.FindStringSubmatch(logOutput)
 	if len(matches) < 2 {
@@ -504,14 +552,6 @@ func extractDeviceCode(logOutput string) string {
 		return ""
 	}
 	return code
-}
-
-func readTunnelLog(containerID string) (string, error) {
-	output, err := runPodmanCommand("exec", containerID, "sh", "-lc", fmt.Sprintf("cat %s 2>/dev/null || true", tunnelLogPath))
-	if err != nil {
-		return "", err
-	}
-	return string(output), nil
 }
 
 func hasVSCodeToken(hostVSCodeDir string) bool {
@@ -724,4 +764,76 @@ func isContainerIDMatch(left string, right string) bool {
 		return false
 	}
 	return left == right || strings.HasPrefix(left, right) || strings.HasPrefix(right, left)
+}
+
+func discoverTunnelStatesForContainers(containers []podmanContainer) map[string]podmanTunnelState {
+	discovered := make(map[string]podmanTunnelState)
+	for _, container := range containers {
+		containerID := strings.TrimSpace(container.ID)
+		if containerID == "" {
+			continue
+		}
+		sessionID := container.Labels[labelTunnelSession]
+		if sessionID == "" {
+			continue
+		}
+		state, ok := discoverTunnelStateFromContainer(containerID, sessionID)
+		if !ok || strings.TrimSpace(state.Status) == "" {
+			continue
+		}
+		discovered[containerID] = state
+	}
+	return discovered
+}
+
+func discoverTunnelStateFromContainer(containerID string, sessionID string) (podmanTunnelState, bool) {
+	pidOutput, pidErr := runPodmanCommand(
+		"exec",
+		containerID,
+		"sh",
+		"-lc",
+		fmt.Sprintf("kill -0 $(cat %s 2>/dev/null) 2>/dev/null && echo alive || echo dead", tunnelPIDFile(sessionID)),
+	)
+	processAlive := pidErr == nil && strings.TrimSpace(string(pidOutput)) == "alive"
+
+	logOutput, logErr := runPodmanCommand("exec", containerID, "sh", "-lc", fmt.Sprintf("cat %s 2>/dev/null || true", tunnelLogFile(sessionID)))
+	if logErr != nil {
+		if !processAlive {
+			return podmanTunnelState{Status: tunnelStatusFailed, Message: "Tunnel process not running."}, true
+		}
+		return podmanTunnelState{Status: tunnelStatusStarting}, false
+	}
+
+	line := latestNonEmptyLine(string(logOutput))
+	if authPromptLinePattern.MatchString(line) {
+		code := extractDeviceCode(line)
+		return podmanTunnelState{
+			Status:  tunnelStatusBlocked,
+			Code:    code,
+			Message: tunnelAuthRequiredMessage,
+		}, true
+	}
+
+	if !processAlive {
+		return podmanTunnelState{Status: tunnelStatusFailed, Message: "Tunnel process not running."}, true
+	}
+
+	if code := extractDeviceCode(line); code != "" {
+		return podmanTunnelState{
+			Status:  tunnelStatusBlocked,
+			Code:    code,
+			Message: tunnelAuthRequiredMessage,
+		}, false
+	}
+
+	return podmanTunnelState{Status: tunnelStatusStarting}, false
+}
+
+func mergeTunnelStateMap(dst map[string]podmanTunnelState, src map[string]podmanTunnelState) {
+	for containerID, state := range src {
+		if strings.TrimSpace(containerID) == "" || strings.TrimSpace(state.Status) == "" {
+			continue
+		}
+		dst[containerID] = state
+	}
 }
